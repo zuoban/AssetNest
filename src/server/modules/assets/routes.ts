@@ -187,7 +187,7 @@ export function registerAssetRoutes(
   config: ResolvedAppConfig,
   storageRegistry: StorageRegistry
 ): void {
-  const requireAuth = createRequireAuthHook(db);
+  const requireAuth = createRequireAuthHook(db, config);
   let activeUploads = 0;
 
   app.post("/api/v1/assets/upload", { preHandler: requireAuth }, async (request, reply) => {

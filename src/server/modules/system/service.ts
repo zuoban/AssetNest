@@ -11,6 +11,7 @@ import type {
 } from "../../../shared/types.js";
 import type { ResolvedAppConfig } from "../../config/schema.js";
 import type { AppDatabase } from "../../db/database.js";
+import { ensureSystemUser } from "../auth/service.js";
 import { mapJobRow, type JobRow } from "../jobs/service.js";
 import { recordActivity } from "./activity.js";
 
@@ -28,6 +29,8 @@ export function syncSystemBootstrapState(db: AppDatabase, config: ResolvedAppCon
   const now = new Date().toISOString();
 
   db.transaction(() => {
+    ensureSystemUser(db);
+
     const defaultSettings: Array<[string, unknown]> = [
       ["default_storage_id", config.storage.default],
       ["trash_retention_days", 30],

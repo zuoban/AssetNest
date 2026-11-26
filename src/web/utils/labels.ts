@@ -1,9 +1,9 @@
 import type { JobType, ValidationIssue } from "../../shared/types";
 
 export const ACTIVITY_ACTION_LABELS: Record<string, string> = {
-  "setup.init": "初始化管理员",
-  "auth.login": "管理员登录",
-  "auth.login_failed": "登录失败",
+  "setup.init": "初始化系统",
+  "auth.login": "访问码登录",
+  "auth.login_failed": "访问码验证失败",
   "auth.logout": "退出登录",
   "auth.admin_reset_cli": "宿主机重置管理员密码",
   "auth.admin_created_cli": "宿主机创建管理员账号",

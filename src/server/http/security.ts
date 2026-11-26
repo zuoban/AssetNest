@@ -1,7 +1,8 @@
 import type { FastifyReply, FastifyRequest } from "fastify";
 import type { UserProfile } from "../../shared/types.js";
+import type { ResolvedAppConfig } from "../config/schema.js";
 import type { AppDatabase } from "../db/database.js";
-import { authenticateSession } from "../modules/auth/service.js";
+import { authenticateSession, ensureSystemUser } from "../modules/auth/service.js";
 import { AppError } from "./errors.js";
 
 export const SESSION_COOKIE_NAME = "assetnest_session";
@@ -68,12 +69,18 @@ export function verifyCsrfHeaderAndOrigin(request: FastifyRequest): void {
   }
 }
 
-export function createRequireAuthHook(db: AppDatabase) {
+export function createRequireAuthHook(db: AppDatabase, config: ResolvedAppConfig) {
   return async function requireAuth(request: FastifyRequest): Promise<void> {
+    const accessCode = config.app.accessCode;
+    if (!accessCode) {
+      request.authUser = ensureSystemUser(db);
+      return;
+    }
+
     const rawToken = request.cookies[SESSION_COOKIE_NAME];
-    const session = authenticateSession(db, rawToken);
+    const session = authenticateSession(db, rawToken, accessCode);
     if (!session) {
-      throw new AppError(401, "UNAUTHORIZED", "请先登录后再访问");
+      throw new AppError(401, "UNAUTHORIZED", "请先输入访问码登录后再访问");
     }
     request.authUser = session.user;
     request.authSessionId = session.sessionId;

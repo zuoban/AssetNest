@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
-import type { AuthMeResponse, SetupStatusResponse } from "../shared/types";
+import type { AuthMeResponse } from "../shared/types";
 import { api, ApiClientError } from "./api/client";
 import { Layout } from "./components/Layout";
 import { AssetsPage } from "./pages/AssetsPage";
@@ -12,7 +12,6 @@ import { LoginPage } from "./pages/LoginPage";
 import { ProductDetailPage } from "./pages/ProductDetailPage";
 import { ProductsPage } from "./pages/ProductsPage";
 import { SettingsPage } from "./pages/SettingsPage";
-import { SetupPage } from "./pages/SetupPage";
 import { StoragePage } from "./pages/StoragePage";
 import { StoresPage } from "./pages/StoresPage";
 import { TemplatesPage } from "./pages/TemplatesPage";
@@ -20,16 +19,14 @@ import { TrashPage } from "./pages/TrashPage";
 
 export function App() {
   const [loading, setLoading] = useState(true);
-  const [setupStatus, setSetupStatus] = useState<SetupStatusResponse | null>(null);
   const [auth, setAuth] = useState<AuthMeResponse | null>(null);
   const [bootError, setBootError] = useState<string | null>(null);
 
   const refreshAuthState = useCallback(async () => {
     setBootError(null);
     try {
-      const status = await api.getSetupStatus();
-      setSetupStatus(status);
-      if (!status.initialized) {
+      const status = await api.getAuthStatus();
+      if (status.authEnabled && !status.authenticated) {
         setAuth(null);
         return;
       }
@@ -83,10 +80,6 @@ export function App() {
         </div>
       </div>
     );
-  }
-
-  if (setupStatus && !setupStatus.initialized) {
-    return <SetupPage setupStatus={setupStatus} onCompleted={refreshAuthState} />;
   }
 
   if (!auth) {

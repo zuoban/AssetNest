@@ -76,7 +76,7 @@ export function registerReleaseRoutes(
   storageRegistry: StorageRegistry,
   worker: JobWorker
 ): void {
-  const requireAuth = createRequireAuthHook(db);
+  const requireAuth = createRequireAuthHook(db, config);
 
   // Export Templates
   app.get("/api/v1/export-templates", { preHandler: requireAuth }, async (request) => {

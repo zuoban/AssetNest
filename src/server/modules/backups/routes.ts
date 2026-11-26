@@ -31,7 +31,7 @@ export function registerBackupRoutes(
   worker: JobWorker,
   setMaintenanceMode: (enabled: boolean) => void
 ): void {
-  const requireAuth = createRequireAuthHook(db);
+  const requireAuth = createRequireAuthHook(db, config);
 
   app.get("/api/v1/backups", { preHandler: requireAuth }, async () => {
     return { items: listBackups(db) };

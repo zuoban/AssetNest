@@ -4,15 +4,23 @@
 
 ## 交付状态（v1.0 / M0–M4 已全部完成）
 
-- **M0（技术基础）**：配置加载校验、SQLite（Node 22 `node:sqlite` + WAL + 版本化迁移）、首次初始化、会话认证、CSRF/限速、宿主机 `reset-admin` CLI、单容器 Docker 部署。
+- **M0（技术基础）**：配置加载校验、SQLite（Node 22 `node:sqlite` + WAL + 版本化迁移）、可选访问码认证（未配置即免登录）、CSRF/限速、宿主机 `revoke-sessions` CLI、单容器 Docker 部署。
 - **M1（素材核心）**：商品/SKU 管理、Local 内容寻址存储与去重、流式上传、文件夹与多级标签、缩略图缓存、安全预览/灯箱/视频 Range 播放、FTS5 中英泰组合检索、回收站与恢复。
 - **M2（存储完整性）**：S3 Compatible / WebDAV 适配器、在线连通性检测、默认存储切换、持久化任务队列 Worker、跨存储断点续传安全迁移、延迟清理队列、引用保护 GC 与一致性备份。
 - **M3（电商多渠道工作流）**：多角度母图锁定与版本历史、按版本独立审核、多店铺与多渠道 Listing、SKU 子集绑定、轮播图拖拽排序、SKU 图/详情图/视频集合、中/英/泰多语种 PDP 文案与历史版本。
 - **M4（交付与加固）**：版本化导出模板、阻断/提醒校验、草稿包与不可变正式 Release、流式 ZIP 上架包与开放标准目录导出、维护模式完整恢复与恶意 ZIP 拦截、50,000 素材性能压测与 AC-01 至 AC-15 全量验收（详见 [`docs/ACCEPTANCE_REPORT.md`](docs/ACCEPTANCE_REPORT.md)）。
 
-## 快速开始（本地开发）
+## 快速开始（本地运行）
 
-环境要求：Node.js `>= 22.13.0`、pnpm `12+`。
+需要 Node.js `>= 22.13.0`、pnpm 和 Make。在项目目录运行：
+
+```bash
+make
+```
+
+`make` 和 `make start` 都会安装依赖、构建前后端并启动服务。启动后打开 [AssetNest 本地页面](http://127.0.0.1:3000)，按 `Ctrl+C` 停止服务。
+
+## 本地开发
 
 ```bash
 pnpm install
@@ -40,7 +48,24 @@ docker compose up -d --build
 
 > 若构建环境需要自定义 npm 镜像源，可使用 `docker build --build-arg NPM_REGISTRY=https://registry.npmmirror.com -t assetnest:0.1.0 .`。
 
-浏览器访问 `http://127.0.0.1:3000` 完成首次管理员初始化。健康探针地址：`GET /healthz`。
+浏览器访问 `http://127.0.0.1:3000` 即可直接使用系统。健康探针地址：`GET /healthz`。
+
+## 访问控制（访问码）
+
+AssetNest 采用简化的环境变量访问码控制，无需注册或维护用户名/密码：
+
+- **免登录模式（默认）**：不配置 `ASSETNEST_ACCESS_CODE`（或留空），打开系统即可直接使用，无需登录。
+- **访问码模式**：本地运行 `ASSETNEST_ACCESS_CODE='你的访问码' make`。使用 Docker Compose 时，在 `.env` 中设置 `ASSETNEST_ACCESS_CODE` 并运行 `docker compose up -d`。修改访问码并重新启动后，旧会话会自动失效。
+
+如需手动吊销所有活动会话，可在宿主机执行：
+
+```bash
+# Docker 环境
+docker compose exec -T assetnest node dist/server/cli.js revoke-sessions
+
+# 本地环境
+node dist/server/cli.js revoke-sessions
+```
 
 ## 升级指南
 
@@ -67,19 +92,6 @@ docker compose up -d --build
    - 预检任何一项失败都会立即中止并回滚，**绝不覆盖或破坏当前运行数据**。
    - 校验通过后在临时目录暂存还原数据库与本地/远程原文件，原子切换数据库并自动重建 FTS5 全文索引与缩略图缓存。
 3. 若目标实例启用了远程存储（S3 / WebDAV），请在恢复前于 `config/config.yaml` 与 `.env` 中配置同名 Provider 凭证。
-
-## 宿主机受控重置管理员密码
-
-已初始化实例无法通过 Web 初始化入口重置管理员。若忘记密码，请在宿主机执行：
-
-```bash
-# Docker 环境
-printf '%s\n' 'NewStrongPassword123' | docker compose exec -T assetnest \
-  node dist/server/cli.js reset-admin --username admin --password-stdin
-
-# 本地环境
-printf '%s\n' 'NewStrongPassword123' | node dist/server/cli.js reset-admin --username admin --password-stdin
-```
 
 ## 文档导航
 

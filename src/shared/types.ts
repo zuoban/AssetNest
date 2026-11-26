@@ -88,13 +88,15 @@ export interface HealthResponse {
   status: "ok" | "maintenance";
   initialized: boolean;
   dbReady: boolean;
+  authEnabled: boolean;
   version: string;
 }
 
-export interface SetupStatusResponse {
-  initialized: boolean;
-  defaultStorageId: string;
-  providersSummary: StorageProviderSummary[];
+export interface AuthStatusResponse {
+  authEnabled: boolean;
+  authenticated: boolean;
+  appName: string;
+  version: string;
 }
 
 export interface UserProfile {
@@ -110,6 +112,7 @@ export interface AuthMeResponse {
   appName: string;
   version: string;
   timezone: string;
+  authEnabled: boolean;
 }
 
 export interface JobRecord {

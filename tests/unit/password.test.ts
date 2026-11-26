@@ -1,21 +1,25 @@
 import { describe, expect, it } from "vitest";
-import { hashPassword, verifyPassword } from "../../src/server/modules/auth/password.js";
+import {
+  generateSessionToken,
+  hashSessionToken,
+  verifyAccessCode
+} from "../../src/server/modules/auth/password.js";
 import { redactDetails } from "../../src/server/modules/system/activity.js";
 
-describe("Password hashing & audit redaction", () => {
-  it("hashes passwords with unique salts and verifies correctly", async () => {
-    const hash1 = await hashPassword("SuperSecret123!");
-    const hash2 = await hashPassword("SuperSecret123!");
+describe("Access code verification, session tokens & audit redaction", () => {
+  it("verifies access codes accurately and ties session token hashes to the active access code", () => {
+    expect(verifyAccessCode("Nest-2026!", "Nest-2026!")).toBe(true);
+    expect(verifyAccessCode("wrong", "Nest-2026!")).toBe(false);
+    expect(verifyAccessCode("Nest-2026", "Nest-2026!")).toBe(false);
 
-    expect(hash1).not.toBe(hash2);
-    expect(hash1.startsWith("scrypt$")).toBe(true);
-    expect(await verifyPassword("SuperSecret123!", hash1)).toBe(true);
-    expect(await verifyPassword("WrongPassword123!", hash1)).toBe(false);
+    const { rawToken, tokenHash } = generateSessionToken("Nest-2026!");
+    expect(hashSessionToken(rawToken, "Nest-2026!")).toBe(tokenHash);
+    expect(hashSessionToken(rawToken, "Rotated-Code!")).not.toBe(tokenHash);
   });
 
   it("recursively redacts sensitive fields before storing audit events", () => {
     const redacted = redactDetails({
-      username: "admin",
+      accessCode: "secret-access-code",
       password: "plaintext-password",
       nested: {
         secretAccessKey: "aws-secret",
@@ -25,7 +29,7 @@ describe("Password hashing & audit redaction", () => {
     });
 
     expect(redacted).toEqual({
-      username: "admin",
+      accessCode: "[REDACTED]",
       password: "[REDACTED]",
       nested: {
         secretAccessKey: "[REDACTED]",

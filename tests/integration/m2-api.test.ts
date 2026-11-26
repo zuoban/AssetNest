@@ -166,6 +166,7 @@ storage:
     configPath,
     env: {
       ASSETNEST_DATA_DIR: dataDir,
+      ASSETNEST_ACCESS_CODE: "test-access-code",
       TEST_S3_AK: s3Server.accessKeyId,
       TEST_S3_SK: s3Server.secretAccessKey,
       TEST_DAV_USER: davServer.username,
@@ -182,26 +183,14 @@ storage:
   });
   runtimes.push(runtime);
 
-  let cookie = "";
-  if (!options?.skipSetup) {
-    const initRes = await runtime.app.inject({
-      method: "POST",
-      url: "/api/v1/setup/init",
-      headers: { "x-assetnest-request": "1" },
-      payload: { username: "admin", displayName: "管理员", password: "StrongPassword123!" }
-    });
-    expect(initRes.statusCode).toBe(201);
-    cookie = extractCookie(initRes.headers["set-cookie"]);
-  } else {
-    const loginRes = await runtime.app.inject({
-      method: "POST",
-      url: "/api/v1/auth/login",
-      headers: { "x-assetnest-request": "1" },
-      payload: { username: "admin", password: "StrongPassword123!" }
-    });
-    expect(loginRes.statusCode).toBe(200);
-    cookie = extractCookie(loginRes.headers["set-cookie"]);
-  }
+  const loginRes = await runtime.app.inject({
+    method: "POST",
+    url: "/api/v1/auth/login",
+    headers: { "x-assetnest-request": "1" },
+    payload: { accessCode: "test-access-code" }
+  });
+  expect(loginRes.statusCode).toBe(200);
+  const cookie = extractCookie(loginRes.headers["set-cookie"]);
 
   return { dir, dataDir, config, runtime, cookie, s3Server, davServer };
 }

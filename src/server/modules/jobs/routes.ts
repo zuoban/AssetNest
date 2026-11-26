@@ -1,4 +1,5 @@
 import type { FastifyInstance } from "fastify";
+import type { ResolvedAppConfig } from "../../config/schema.js";
 import type { AppDatabase } from "../../db/database.js";
 import { createRequireAuthHook } from "../../http/security.js";
 import { cancelJob, getJobById, retryJob } from "./service.js";
@@ -7,9 +8,10 @@ import type { JobWorker } from "./worker.js";
 export function registerJobRoutes(
   app: FastifyInstance,
   db: AppDatabase,
+  config: ResolvedAppConfig,
   worker: JobWorker
 ): void {
-  const requireAuth = createRequireAuthHook(db);
+  const requireAuth = createRequireAuthHook(db, config);
 
   app.get("/api/v1/jobs/:id", { preHandler: requireAuth }, async (request) => {
     const { id } = request.params as { id: string };

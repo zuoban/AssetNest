@@ -9,6 +9,7 @@ import type {
   AssetType,
   AssetVersionRecord,
   AuthMeResponse,
+  AuthStatusResponse,
   BackupKind,
   BackupRecord,
   CacheClearResult,
@@ -41,7 +42,6 @@ import type {
   ReleaseSummary,
   RestoreBackupResult,
   ReviewStatus,
-  SetupStatusResponse,
   SkuRecord,
   SkuStatus,
   StorageCleanupItem,
@@ -98,20 +98,10 @@ async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
-  getSetupStatus(): Promise<SetupStatusResponse> {
-    return requestJson("/api/v1/setup/status");
+  getAuthStatus(): Promise<AuthStatusResponse> {
+    return requestJson("/api/v1/auth/status");
   },
-  initAdmin(payload: {
-    username: string;
-    displayName: string;
-    password: string;
-  }): Promise<{ user: UserProfile }> {
-    return requestJson("/api/v1/setup/init", {
-      method: "POST",
-      body: JSON.stringify(payload)
-    });
-  },
-  login(payload: { username: string; password: string }): Promise<{ user: UserProfile }> {
+  login(payload: { accessCode: string }): Promise<{ user: UserProfile }> {
     return requestJson("/api/v1/auth/login", {
       method: "POST",
       body: JSON.stringify(payload)

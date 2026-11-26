@@ -74,19 +74,19 @@ async function bootAuthedApp() {
   const dataDir = path.join(dir, "data");
   const config = loadConfig({
     cwd: dir,
-    env: { ASSETNEST_DATA_DIR: dataDir }
+    env: { ASSETNEST_DATA_DIR: dataDir, ASSETNEST_ACCESS_CODE: "test-access-code" }
   });
   const runtime = await createApp({ config, logger: false });
   runtimes.push(runtime);
 
-  const initRes = await runtime.app.inject({
+  const loginRes = await runtime.app.inject({
     method: "POST",
-    url: "/api/v1/setup/init",
+    url: "/api/v1/auth/login",
     headers: { "x-assetnest-request": "1" },
-    payload: { username: "admin", displayName: "管理员", password: "StrongPassword123!" }
+    payload: { accessCode: "test-access-code" }
   });
-  expect(initRes.statusCode).toBe(201);
-  const cookie = extractCookie(initRes.headers["set-cookie"]);
+  expect(loginRes.statusCode).toBe(200);
+  const cookie = extractCookie(loginRes.headers["set-cookie"]);
   const authHeaders = { cookie, "x-assetnest-request": "1" };
 
   return { dir, dataDir, config, runtime, cookie, authHeaders };

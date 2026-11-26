@@ -48,7 +48,7 @@ export function registerSystemRoutes(
   db: AppDatabase,
   config: ResolvedAppConfig
 ): void {
-  const requireAuth = createRequireAuthHook(db);
+  const requireAuth = createRequireAuthHook(db, config);
 
   app.get("/api/v1/dashboard", { preHandler: requireAuth }, async () => {
     return getDashboardSummary(db);

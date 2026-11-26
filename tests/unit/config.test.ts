@@ -28,10 +28,26 @@ describe("Config Loader", () => {
     });
 
     expect(cfg.configPath).toBeNull();
+    expect(cfg.app.accessCode).toBeNull();
     expect(cfg.storage.default).toBe("local");
     expect(cfg.storage.providers.local?.type).toBe("local");
     expect(cfg.storage.providers.local?.enabled).toBe(true);
     expect(cfg.database.path).toBe(path.join(dir, "data", "db", "assetnest.db"));
+  });
+
+  it("parses optional ASSETNEST_ACCESS_CODE and treats blank values as disabled", () => {
+    const dir = makeTempDir();
+    const blankCfg = loadConfig({
+      cwd: dir,
+      env: { ASSETNEST_DATA_DIR: path.join(dir, "data"), ASSETNEST_ACCESS_CODE: "   " }
+    });
+    expect(blankCfg.app.accessCode).toBeNull();
+
+    const enabledCfg = loadConfig({
+      cwd: dir,
+      env: { ASSETNEST_DATA_DIR: path.join(dir, "data"), ASSETNEST_ACCESS_CODE: "  my-code-123  " }
+    });
+    expect(enabledCfg.app.accessCode).toBe("my-code-123");
   });
 
   it("does not require env vars for explicitly disabled remote providers", () => {

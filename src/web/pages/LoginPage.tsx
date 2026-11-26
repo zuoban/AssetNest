@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from "react";
-import { AlertCircle, Box } from "lucide-react";
+import { AlertCircle, Box, Eye, EyeOff, KeyRound } from "lucide-react";
 import { api, ApiClientError } from "../api/client";
 
 interface LoginPageProps {
@@ -7,8 +7,8 @@ interface LoginPageProps {
 }
 
 export function LoginPage({ onLoggedIn }: LoginPageProps) {
-  const [username, setUsername] = useState("admin");
-  const [password, setPassword] = useState("");
+  const [accessCode, setAccessCode] = useState("");
+  const [showCode, setShowCode] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
 
@@ -17,7 +17,7 @@ export function LoginPage({ onLoggedIn }: LoginPageProps) {
     setError(null);
     setSubmitting(true);
     try {
-      await api.login({ username, password });
+      await api.login({ accessCode });
       await onLoggedIn();
     } catch (err) {
       if (err instanceof ApiClientError) {
@@ -39,7 +39,7 @@ export function LoginPage({ onLoggedIn }: LoginPageProps) {
           </div>
           <div>
             <h1 className="text-lg font-semibold text-gray-900">登录 AssetNest</h1>
-            <p className="text-xs text-gray-500">跨境电商数字资产管理平台</p>
+            <p className="text-xs text-gray-500">请输入访问码进入系统</p>
           </div>
         </div>
 
@@ -52,33 +52,34 @@ export function LoginPage({ onLoggedIn }: LoginPageProps) {
 
         <form onSubmit={(e) => void handleSubmit(e)} className="space-y-4">
           <div>
-            <label className="mb-1 block text-xs font-medium text-gray-700" htmlFor="login-user">
-              用户名
+            <label
+              className="mb-1 flex items-center gap-1.5 text-xs font-medium text-gray-700"
+              htmlFor="login-access-code"
+            >
+              <KeyRound className="h-3.5 w-3.5 text-gray-500" />
+              <span>访问码</span>
             </label>
-            <input
-              id="login-user"
-              type="text"
-              required
-              autoComplete="username"
-              value={username}
-              onChange={(e) => setUsername(e.target.value)}
-              className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 focus:outline-none"
-            />
-          </div>
-
-          <div>
-            <label className="mb-1 block text-xs font-medium text-gray-700" htmlFor="login-pass">
-              密码
-            </label>
-            <input
-              id="login-pass"
-              type="password"
-              required
-              autoComplete="current-password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm text-gray-900 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 focus:outline-none"
-            />
+            <div className="relative">
+              <input
+                id="login-access-code"
+                type={showCode ? "text" : "password"}
+                required
+                autoFocus
+                autoComplete="current-password"
+                placeholder="请输入访问码"
+                value={accessCode}
+                onChange={(e) => setAccessCode(e.target.value)}
+                className="w-full rounded-lg border border-gray-300 bg-white py-2 pr-10 pl-3 text-sm text-gray-900 focus:border-blue-500 focus:ring-2 focus:ring-blue-500/20 focus:outline-none"
+              />
+              <button
+                type="button"
+                onClick={() => setShowCode((v) => !v)}
+                aria-label={showCode ? "隐藏访问码" : "显示访问码"}
+                className="absolute top-1/2 right-2.5 -translate-y-1/2 rounded p-1 text-gray-400 hover:text-gray-600"
+              >
+                {showCode ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+              </button>
+            </div>
           </div>
 
           <button
@@ -91,10 +92,8 @@ export function LoginPage({ onLoggedIn }: LoginPageProps) {
         </form>
 
         <div className="mt-5 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2.5 text-[11px] leading-relaxed text-gray-600">
-          忘记管理员密码？请在宿主机容器内执行受控重置命令：
-          <code className="font-mono-tabular mt-1 block text-gray-800">
-            node dist/server/cli.js reset-admin --username admin --password-stdin
-          </code>
+          访问码由环境变量 <code className="font-mono-tabular text-gray-800">ASSETNEST_ACCESS_CODE</code>{" "}
+          控制；如需修改访问码或取消登录，请调整该环境变量后重启服务。
         </div>
       </div>
     </div>

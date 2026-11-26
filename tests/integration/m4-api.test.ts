@@ -188,7 +188,7 @@ storage:
 `;
   fs.writeFileSync(configPath, yaml, "utf8");
 
-  const env: Record<string, string> = { ASSETNEST_DATA_DIR: dataDir };
+  const env: Record<string, string> = { ASSETNEST_DATA_DIR: dataDir, ASSETNEST_ACCESS_CODE: "test-access-code" };
   if (options?.s3Server) {
     env.TEST_S3_AK = options.s3Server.accessKeyId;
     env.TEST_S3_SK = options.s3Server.secretAccessKey;
@@ -202,14 +202,14 @@ storage:
     runtime.worker.start();
   }
 
-  const initRes = await runtime.app.inject({
+  const loginRes = await runtime.app.inject({
     method: "POST",
-    url: "/api/v1/setup/init",
+    url: "/api/v1/auth/login",
     headers: { "x-assetnest-request": "1" },
-    payload: { username: "admin", displayName: "管理员", password: "StrongPassword123!" }
+    payload: { accessCode: "test-access-code" }
   });
-  expect(initRes.statusCode).toBe(201);
-  const cookie = extractCookie(initRes.headers["set-cookie"]);
+  expect(loginRes.statusCode).toBe(200);
+  const cookie = extractCookie(loginRes.headers["set-cookie"]);
   const authHeaders = { cookie, "x-assetnest-request": "1" };
 
   return { dir, dataDir, config, runtime, cookie, authHeaders };
@@ -1057,7 +1057,7 @@ describe("M4 API integration (Templates, Preflight, Immutable Releases, ZIP Expo
       method: "POST",
       url: "/api/v1/auth/login",
       headers: { "x-assetnest-request": "1" },
-      payload: { username: "admin", password: "StrongPassword123!" }
+      payload: { accessCode: "test-access-code" }
     });
     expect(loginB.statusCode).toBe(200);
     const headersB = {

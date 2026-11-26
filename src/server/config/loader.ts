@@ -175,6 +175,9 @@ export function loadConfig(options: LoadConfigOptions = {}): ResolvedAppConfig {
     throw new Error(`无效监听端口: ${String(port)}`);
   }
 
+  const rawAccessCode = env.ASSETNEST_ACCESS_CODE?.trim();
+  const accessCode = rawAccessCode && rawAccessCode.length > 0 ? rawAccessCode : null;
+
   return {
     configPath,
     app: {
@@ -184,7 +187,8 @@ export function loadConfig(options: LoadConfigOptions = {}): ResolvedAppConfig {
       locale: base.app.locale,
       timezone: base.app.timezone,
       dataDir,
-      cookieSecure: env.ASSETNEST_COOKIE_SECURE === "true"
+      cookieSecure: env.ASSETNEST_COOKIE_SECURE === "true",
+      accessCode
     },
     database: {
       path: dbPath,

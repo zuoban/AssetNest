@@ -9,10 +9,12 @@ import {
   Images,
   LayoutDashboard,
   Layers,
+  Lock,
   LogOut,
   Menu,
   Package,
   Settings,
+  ShieldCheck,
   Sliders,
   Store,
   Trash2,
@@ -133,21 +135,34 @@ export function Layout({ auth, onLogout, children }: LayoutProps) {
       </nav>
 
       <div className="border-t border-gray-200 p-3">
-        <div className="mb-2 rounded-lg bg-gray-50 px-3 py-2">
-          <div className="truncate text-xs font-medium text-gray-900">{auth.user.displayName}</div>
-          <div className="font-mono-tabular truncate text-[11px] text-gray-500">
-            @{auth.user.username}
+        {auth.authEnabled ? (
+          <>
+            <div className="mb-2 flex items-center gap-2 rounded-lg bg-gray-50 px-3 py-2">
+              <Lock className="h-3.5 w-3.5 shrink-0 text-blue-600" />
+              <div className="min-w-0">
+                <div className="truncate text-xs font-medium text-gray-900">访问码保护</div>
+                <div className="truncate text-[11px] text-gray-500">已验证当前会话</div>
+              </div>
+            </div>
+            <button
+              type="button"
+              disabled={loggingOut}
+              onClick={() => void handleLogout()}
+              className="flex w-full items-center justify-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:opacity-50"
+            >
+              <LogOut className="h-3.5 w-3.5" />
+              <span>{loggingOut ? "正在退出..." : "退出登录"}</span>
+            </button>
+          </>
+        ) : (
+          <div className="flex items-center gap-2 rounded-lg bg-gray-50 px-3 py-2">
+            <ShieldCheck className="h-3.5 w-3.5 shrink-0 text-emerald-600" />
+            <div className="min-w-0">
+              <div className="truncate text-xs font-medium text-gray-900">免登录模式</div>
+              <div className="truncate text-[11px] text-gray-500">未配置访问码</div>
+            </div>
           </div>
-        </div>
-        <button
-          type="button"
-          disabled={loggingOut}
-          onClick={() => void handleLogout()}
-          className="flex w-full items-center justify-center gap-2 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 transition-colors hover:bg-gray-50 disabled:opacity-50"
-        >
-          <LogOut className="h-3.5 w-3.5" />
-          <span>{loggingOut ? "正在退出..." : "退出登录"}</span>
-        </button>
+        )}
       </div>
     </div>
   );

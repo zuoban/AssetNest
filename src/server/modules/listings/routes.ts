@@ -1,6 +1,7 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { AssetSetKind, DictionaryCategory } from "../../../shared/types.js";
+import type { ResolvedAppConfig } from "../../config/schema.js";
 import type { AppDatabase } from "../../db/database.js";
 import { createRequireAuthHook } from "../../http/security.js";
 import { getListingAssetSets, replaceListingAssetSet } from "./asset-sets.js";
@@ -167,8 +168,12 @@ const copyPdpToSchema = z.object({
   keepTargetLanguage: z.boolean().optional()
 });
 
-export function registerListingRoutes(app: FastifyInstance, db: AppDatabase): void {
-  const requireAuth = createRequireAuthHook(db);
+export function registerListingRoutes(
+  app: FastifyInstance,
+  db: AppDatabase,
+  config: ResolvedAppConfig
+): void {
+  const requireAuth = createRequireAuthHook(db, config);
 
   // Dictionaries
   app.get("/api/v1/dictionaries", { preHandler: requireAuth }, async (request) => {

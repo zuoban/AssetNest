@@ -1,53 +1,63 @@
 import crypto from "node:crypto";
 import type { UserProfile } from "../../../shared/types.js";
+import type { ResolvedAppConfig } from "../../config/schema.js";
 import type { AppDatabase } from "../../db/database.js";
 import { AppError } from "../../http/errors.js";
 import { recordActivity } from "../system/activity.js";
-import {
-  generateSessionToken,
-  hashPassword,
-  hashSessionToken,
-  verifyPassword
-} from "./password.js";
+import { generateSessionToken, hashSessionToken, verifyAccessCode } from "./password.js";
 
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const SYSTEM_USER_ID = "system-admin";
 
 interface UserRow {
   id: string;
   username: string;
   display_name: string;
-  password_hash: string;
   role: "admin";
   created_at: string;
 }
 
-export function isSystemInitialized(db: AppDatabase): boolean {
-  const row = db.raw.prepare("SELECT COUNT(*) AS count FROM users").get() as { count: number };
-  return Number(row.count) > 0;
+export function isAuthEnabled(config: ResolvedAppConfig): boolean {
+  return config.app.accessCode !== null && config.app.accessCode.length > 0;
 }
 
-export interface InitAdminInput {
-  username: string;
-  displayName: string;
-  password: string;
-  userAgent?: string;
-  ipAddress?: string;
-}
+export function ensureSystemUser(db: AppDatabase): UserProfile {
+  const existing = db.raw
+    .prepare(
+      "SELECT id, username, display_name, role, created_at FROM users ORDER BY created_at ASC LIMIT 1"
+    )
+    .get() as UserRow | undefined;
 
-export async function initializeAdmin(
-  db: AppDatabase,
-  input: InitAdminInput
-): Promise<{ user: UserProfile; rawToken: string; expiresAt: string }> {
-  const passwordHash = await hashPassword(input.password);
+  if (existing) {
+    const now = new Date().toISOString();
+    db.raw
+      .prepare("INSERT OR IGNORE INTO settings (key, value_json, updated_at) VALUES ('initialized_at', ?, ?)")
+      .run(JSON.stringify(existing.created_at || now), now);
+
+    return {
+      id: existing.id,
+      username: existing.username,
+      displayName: existing.display_name,
+      role: existing.role,
+      createdAt: existing.created_at
+    };
+  }
+
   const now = new Date().toISOString();
-  const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
-  const userId = crypto.randomUUID();
-  const sessionId = crypto.randomUUID();
-  const { rawToken, tokenHash } = generateSessionToken();
-
-  db.transaction(() => {
-    if (isSystemInitialized(db)) {
-      throw new AppError(409, "CONFLICT", "系统已完成初始化，不能重复创建管理员");
+  return db.transaction(() => {
+    const recheck = db.raw
+      .prepare(
+        "SELECT id, username, display_name, role, created_at FROM users ORDER BY created_at ASC LIMIT 1"
+      )
+      .get() as UserRow | undefined;
+    if (recheck) {
+      return {
+        id: recheck.id,
+        username: recheck.username,
+        displayName: recheck.display_name,
+        role: recheck.role,
+        createdAt: recheck.created_at
+      };
     }
 
     db.raw
@@ -55,90 +65,57 @@ export async function initializeAdmin(
         `INSERT INTO users (id, username, display_name, password_hash, role, created_at, updated_at)
          VALUES (?, ?, ?, ?, 'admin', ?, ?)`
       )
-      .run(userId, input.username.trim(), input.displayName.trim(), passwordHash, now, now);
+      .run(SYSTEM_USER_ID, "admin", "管理员", "access_code_managed", now, now);
 
     db.raw
       .prepare(
-        `INSERT INTO sessions (id, user_id, token_hash, user_agent, ip_address, expires_at, created_at, last_seen_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-      )
-      .run(
-        sessionId,
-        userId,
-        tokenHash,
-        input.userAgent ?? null,
-        input.ipAddress ?? null,
-        expiresAt,
-        now,
-        now
-      );
-
-    db.raw
-      .prepare(
-        `INSERT INTO settings (key, value_json, updated_at) VALUES ('initialized_at', ?, ?)
-         ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`
+        "INSERT OR IGNORE INTO settings (key, value_json, updated_at) VALUES ('initialized_at', ?, ?)"
       )
       .run(JSON.stringify(now), now);
 
-    recordActivity(db, {
-      actorUserId: userId,
-      action: "setup.init",
-      objectType: "user",
-      objectId: userId,
-      details: { username: input.username.trim() }
-    });
-  });
-
-  return {
-    user: {
-      id: userId,
-      username: input.username.trim(),
-      displayName: input.displayName.trim(),
+    return {
+      id: SYSTEM_USER_ID,
+      username: "admin",
+      displayName: "管理员",
       role: "admin",
       createdAt: now
-    },
-    rawToken,
-    expiresAt
-  };
+    };
+  });
 }
 
-export interface LoginInput {
-  username: string;
-  password: string;
+export interface AccessCodeLoginInput {
+  accessCode: string;
   userAgent?: string;
   ipAddress?: string;
 }
 
-export async function loginAdmin(
+export function loginWithAccessCode(
   db: AppDatabase,
-  input: LoginInput
-): Promise<{ user: UserProfile; rawToken: string; expiresAt: string }> {
-  if (!isSystemInitialized(db)) {
-    throw new AppError(409, "CONFLICT", "系统尚未初始化，请先完成首次管理员引导");
+  config: ResolvedAppConfig,
+  input: AccessCodeLoginInput
+): { user: UserProfile; rawToken: string; expiresAt: string } {
+  const configuredCode = config.app.accessCode;
+  if (!configuredCode) {
+    throw new AppError(409, "CONFLICT", "当前未配置访问码，无需登录");
   }
 
-  const userRow = db.raw
-    .prepare(
-      "SELECT id, username, display_name, password_hash, role, created_at FROM users WHERE username = ?"
-    )
-    .get(input.username.trim()) as UserRow | undefined;
-
-  const valid = userRow ? await verifyPassword(input.password, userRow.password_hash) : false;
-  if (!userRow || !valid) {
+  const valid = verifyAccessCode(input.accessCode, configuredCode);
+  if (!valid) {
     recordActivity(db, {
       actorUserId: null,
       action: "auth.login_failed",
       objectType: "auth",
       objectId: null,
-      details: { username: input.username.trim(), ipAddress: input.ipAddress ?? "unknown" }
+      details: { ipAddress: input.ipAddress ?? "unknown" }
     });
-    throw new AppError(401, "UNAUTHORIZED", "用户名或密码不正确");
+    throw new AppError(401, "UNAUTHORIZED", "访问码不正确");
   }
 
+  const user = ensureSystemUser(db);
   const now = new Date().toISOString();
   const expiresAt = new Date(Date.now() + SESSION_TTL_MS).toISOString();
   const sessionId = crypto.randomUUID();
-  const { rawToken, tokenHash } = generateSessionToken();
+  const { rawToken, tokenHash } = generateSessionToken(configuredCode);
 
   db.transaction(() => {
     db.raw.prepare("DELETE FROM sessions WHERE expires_at <= ?").run(now);
@@ -149,7 +126,7 @@ export async function loginAdmin(
       )
       .run(
         sessionId,
-        userRow.id,
+        user.id,
         tokenHash,
         input.userAgent ?? null,
         input.ipAddress ?? null,
@@ -159,7 +136,7 @@ export async function loginAdmin(
       );
 
     recordActivity(db, {
-      actorUserId: userRow.id,
+      actorUserId: user.id,
       action: "auth.login",
       objectType: "session",
       objectId: sessionId,
@@ -168,13 +145,7 @@ export async function loginAdmin(
   });
 
   return {
-    user: {
-      id: userRow.id,
-      username: userRow.username,
-      displayName: userRow.display_name,
-      role: userRow.role,
-      createdAt: userRow.created_at
-    },
+    user,
     rawToken,
     expiresAt
   };
@@ -182,10 +153,11 @@ export async function loginAdmin(
 
 export function authenticateSession(
   db: AppDatabase,
-  rawToken: string | undefined
+  rawToken: string | undefined,
+  accessCode: string
 ): { sessionId: string; user: UserProfile } | null {
   if (!rawToken) return null;
-  const tokenHash = hashSessionToken(rawToken);
+  const tokenHash = hashSessionToken(rawToken, accessCode);
   const now = new Date().toISOString();
 
   const row = db.raw
@@ -227,9 +199,14 @@ export function authenticateSession(
   };
 }
 
-export function revokeSession(db: AppDatabase, rawToken: string | undefined, userId?: string): void {
-  if (!rawToken) return;
-  const tokenHash = hashSessionToken(rawToken);
+export function revokeSession(
+  db: AppDatabase,
+  rawToken: string | undefined,
+  accessCode: string | null,
+  userId?: string
+): void {
+  if (!rawToken || !accessCode) return;
+  const tokenHash = hashSessionToken(rawToken, accessCode);
   db.transaction(() => {
     db.raw.prepare("DELETE FROM sessions WHERE token_hash = ?").run(tokenHash);
     if (userId) {
@@ -243,66 +220,9 @@ export function revokeSession(db: AppDatabase, rawToken: string | undefined, use
   });
 }
 
-export async function resetAdminPasswordCli(
-  db: AppDatabase,
-  username: string,
-  newPassword: string
-): Promise<{ userId: string; username: string; created: boolean }> {
-  if (newPassword.length < 8) {
-    throw new Error("新密码长度不能少于 8 个字符");
-  }
-  const passwordHash = await hashPassword(newPassword);
-  const now = new Date().toISOString();
-
+export function revokeAllSessions(db: AppDatabase): number {
   return db.transaction(() => {
-    const existing = db.raw
-      .prepare("SELECT id, username FROM users WHERE username = ?")
-      .get(username.trim()) as { id: string; username: string } | undefined;
-
-    if (existing) {
-      db.raw
-        .prepare("UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?")
-        .run(passwordHash, now, existing.id);
-      db.raw.prepare("DELETE FROM sessions WHERE user_id = ?").run(existing.id);
-      recordActivity(db, {
-        actorUserId: existing.id,
-        action: "auth.admin_reset_cli",
-        objectType: "user",
-        objectId: existing.id,
-        details: { username: existing.username }
-      });
-      return { userId: existing.id, username: existing.username, created: false };
-    }
-
-    const anyAdmin = db.raw.prepare("SELECT id, username FROM users LIMIT 1").get() as
-      | { id: string; username: string }
-      | undefined;
-    if (anyAdmin) {
-      throw new Error(
-        `未找到用户名 "${username}"；当前已存在管理员 "${anyAdmin.username}"，请指定正确的用户名`
-      );
-    }
-
-    const newId = crypto.randomUUID();
-    db.raw
-      .prepare(
-        `INSERT INTO users (id, username, display_name, password_hash, role, created_at, updated_at)
-         VALUES (?, ?, ?, ?, 'admin', ?, ?)`
-      )
-      .run(newId, username.trim(), "系统管理员", passwordHash, now, now);
-    db.raw
-      .prepare(
-        `INSERT INTO settings (key, value_json, updated_at) VALUES ('initialized_at', ?, ?)
-         ON CONFLICT(key) DO UPDATE SET value_json = excluded.value_json, updated_at = excluded.updated_at`
-      )
-      .run(JSON.stringify(now), now);
-    recordActivity(db, {
-      actorUserId: newId,
-      action: "auth.admin_created_cli",
-      objectType: "user",
-      objectId: newId,
-      details: { username: username.trim() }
-    });
-    return { userId: newId, username: username.trim(), created: true };
+    const result = db.raw.prepare("DELETE FROM sessions").run();
+    return Number(result.changes ?? 0);
   });
 }

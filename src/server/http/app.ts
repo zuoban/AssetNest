@@ -13,7 +13,7 @@ import { runMigrations } from "../db/migrator.js";
 import { registerAssetRoutes } from "../modules/assets/routes.js";
 import { ensureThumbnailReady, resolveAssetVersionFile } from "../modules/assets/service.js";
 import { registerAuthRoutes } from "../modules/auth/routes.js";
-import { isSystemInitialized } from "../modules/auth/service.js";
+import { isAuthEnabled } from "../modules/auth/service.js";
 import { registerBackupRoutes } from "../modules/backups/routes.js";
 import { executeBackupJob } from "../modules/backups/service.js";
 import { registerJobRoutes } from "../modules/jobs/routes.js";
@@ -103,6 +103,7 @@ export async function createApp(options: CreateAppOptions): Promise<AppRuntime> 
             paths: [
               "req.headers.cookie",
               "req.headers.authorization",
+              "*.accessCode",
               "*.password",
               "*.secretAccessKey",
               "*.token",
@@ -193,18 +194,17 @@ export async function createApp(options: CreateAppOptions): Promise<AppRuntime> 
 
   app.get("/healthz", async (): Promise<HealthResponse> => {
     let dbReady = false;
-    let initialized = false;
     try {
       db.raw.prepare("SELECT 1").get();
       dbReady = true;
-      initialized = isSystemInitialized(db);
     } catch {
       dbReady = false;
     }
     return {
       status: maintenanceMode ? "maintenance" : "ok",
-      initialized,
+      initialized: dbReady,
       dbReady,
+      authEnabled: isAuthEnabled(config),
       version: APP_VERSION
     };
   });
@@ -216,17 +216,17 @@ export async function createApp(options: CreateAppOptions): Promise<AppRuntime> 
     loginRateLimitMax
   });
   registerSystemRoutes(app, db, config);
-  registerJobRoutes(app, db, worker);
+  registerJobRoutes(app, db, config, worker);
   registerStorageOpsRoutes(app, db, config, storageRegistry, worker);
   registerBackupRoutes(app, db, config, storageRegistry, worker, (enabled) => {
     maintenanceMode = enabled;
   });
-  registerProductRoutes(app, db);
-  registerTaxonomyRoutes(app, db);
+  registerProductRoutes(app, db, config);
+  registerTaxonomyRoutes(app, db, config);
   registerAssetRoutes(app, db, config, storageRegistry);
-  registerListingRoutes(app, db);
+  registerListingRoutes(app, db, config);
   registerReleaseRoutes(app, db, config, storageRegistry, worker);
-  registerTrashRoutes(app, db, worker);
+  registerTrashRoutes(app, db, config, worker);
 
   app.all("/api/*", async () => {
     throw new AppError(404, "NOT_FOUND", "请求的 API 接口不存在");

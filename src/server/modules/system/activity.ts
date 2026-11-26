@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import type { AppDatabase } from "../../db/database.js";
 
 const REDACTED_KEYS = new Set([
+  "accesscode",
   "password",
   "passwordhash",
   "secret",

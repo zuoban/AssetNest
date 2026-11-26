@@ -50,7 +50,7 @@ export function registerStorageOpsRoutes(
   storageRegistry: StorageRegistry,
   worker: JobWorker
 ): void {
-  const requireAuth = createRequireAuthHook(db);
+  const requireAuth = createRequireAuthHook(db, config);
 
   app.post("/api/v1/storage/providers/:id/test", { preHandler: requireAuth }, async (request) => {
     const { id } = request.params as { id: string };

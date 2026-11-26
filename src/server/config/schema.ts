@@ -111,6 +111,7 @@ export interface ResolvedAppConfig {
     timezone: string;
     dataDir: string;
     cookieSecure: boolean;
+    accessCode: string | null;
   };
   database: {
     path: string;

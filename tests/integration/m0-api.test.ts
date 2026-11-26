@@ -4,7 +4,6 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { loadConfig } from "../../src/server/config/loader.js";
 import { createApp, type AppRuntime } from "../../src/server/http/app.js";
-import { resetAdminPasswordCli } from "../../src/server/modules/auth/service.js";
 
 const tempDirs: string[] = [];
 const runtimes: AppRuntime[] = [];
@@ -31,7 +30,7 @@ afterEach(async () => {
 });
 
 describe("M0 API end-to-end foundation", () => {
-  it("supports healthz, first-time setup lockout, auth protection, CSRF guard, persistence across restart, and CLI admin reset", async () => {
+  it("allows direct system access without login when ASSETNEST_ACCESS_CODE is not configured while keeping CSRF guard", async () => {
     const dir = makeTempDir();
     const config = loadConfig({
       cwd: dir,
@@ -49,55 +48,23 @@ describe("M0 API end-to-end foundation", () => {
     expect(healthRes.statusCode).toBe(200);
     expect(healthRes.json()).toMatchObject({
       status: "ok",
-      initialized: false,
-      dbReady: true
+      initialized: true,
+      dbReady: true,
+      authEnabled: false
     });
 
-    const unauthDash = await runtime.app.inject({ method: "GET", url: "/api/v1/dashboard" });
-    expect(unauthDash.statusCode).toBe(401);
-
-    const noCsrfRes = await runtime.app.inject({
-      method: "POST",
-      url: "/api/v1/setup/init",
-      payload: { username: "admin", displayName: "管理员", password: "Password123!" }
+    const statusRes = await runtime.app.inject({ method: "GET", url: "/api/v1/auth/status" });
+    expect(statusRes.statusCode).toBe(200);
+    expect(statusRes.json()).toMatchObject({
+      authEnabled: false,
+      authenticated: true
     });
-    expect(noCsrfRes.statusCode).toBe(403);
 
-    const badOriginRes = await runtime.app.inject({
-      method: "POST",
-      url: "/api/v1/setup/init",
-      headers: {
-        "x-assetnest-request": "1",
-        host: "127.0.0.1:3000",
-        origin: "https://evil.example.com"
-      },
-      payload: { username: "admin", displayName: "管理员", password: "Password123!" }
-    });
-    expect(badOriginRes.statusCode).toBe(403);
+    const meRes = await runtime.app.inject({ method: "GET", url: "/api/v1/auth/me" });
+    expect(meRes.statusCode).toBe(200);
+    expect(meRes.json().authEnabled).toBe(false);
 
-    const initRes = await runtime.app.inject({
-      method: "POST",
-      url: "/api/v1/setup/init",
-      headers: { "x-assetnest-request": "1" },
-      payload: { username: "admin", displayName: "卖家主管", password: "Password123!" }
-    });
-    expect(initRes.statusCode).toBe(201);
-    const sessionCookie = extractCookie(initRes.headers["set-cookie"]);
-    expect(sessionCookie).toContain("assetnest_session=");
-
-    const reinitRes = await runtime.app.inject({
-      method: "POST",
-      url: "/api/v1/setup/init",
-      headers: { "x-assetnest-request": "1" },
-      payload: { username: "hacker", displayName: "Hacker", password: "Password123!" }
-    });
-    expect(reinitRes.statusCode).toBe(409);
-
-    const dashRes = await runtime.app.inject({
-      method: "GET",
-      url: "/api/v1/dashboard",
-      headers: { cookie: sessionCookie }
-    });
+    const dashRes = await runtime.app.inject({ method: "GET", url: "/api/v1/dashboard" });
     expect(dashRes.statusCode).toBe(200);
     expect(dashRes.json().counts).toEqual({
       products: 0,
@@ -108,6 +75,118 @@ describe("M0 API end-to-end foundation", () => {
       failedJobs: 0
     });
 
+    // Mutating requests still require CSRF header and same-origin
+    const noCsrfRes = await runtime.app.inject({
+      method: "PATCH",
+      url: "/api/v1/settings",
+      payload: { trashRetentionDays: 45 }
+    });
+    expect(noCsrfRes.statusCode).toBe(403);
+
+    const badOriginRes = await runtime.app.inject({
+      method: "PATCH",
+      url: "/api/v1/settings",
+      headers: {
+        "x-assetnest-request": "1",
+        host: "127.0.0.1:3000",
+        origin: "https://evil.example.com"
+      },
+      payload: { trashRetentionDays: 45 }
+    });
+    expect(badOriginRes.statusCode).toBe(403);
+
+    const patchSettings = await runtime.app.inject({
+      method: "PATCH",
+      url: "/api/v1/settings",
+      headers: { "x-assetnest-request": "1" },
+      payload: { trashRetentionDays: 45, appTimezone: "Asia/Bangkok" }
+    });
+    expect(patchSettings.statusCode).toBe(200);
+    expect(patchSettings.json().trashRetentionDays).toBe(45);
+    expect(patchSettings.json().appTimezone).toBe("Asia/Bangkok");
+
+    // Login endpoint reports conflict when access code is disabled
+    const loginDisabledRes = await runtime.app.inject({
+      method: "POST",
+      url: "/api/v1/auth/login",
+      headers: { "x-assetnest-request": "1" },
+      payload: { accessCode: "anything" }
+    });
+    expect(loginDisabledRes.statusCode).toBe(409);
+  });
+
+  it("enforces access-code login when ASSETNEST_ACCESS_CODE is set, persists sessions across restart, and invalidates sessions on code rotation", async () => {
+    const dir = makeTempDir();
+    const dataDir = path.join(dir, "data");
+    const config = loadConfig({
+      cwd: dir,
+      env: {
+        ASSETNEST_DATA_DIR: dataDir,
+        ASSETNEST_ACCESS_CODE: "SecretCode2026!"
+      }
+    });
+
+    const runtime = await createApp({
+      config,
+      logger: false,
+      loginRateLimitMax: 5
+    });
+    runtimes.push(runtime);
+
+    const healthRes = await runtime.app.inject({ method: "GET", url: "/healthz" });
+    expect(healthRes.statusCode).toBe(200);
+    expect(healthRes.json()).toMatchObject({
+      status: "ok",
+      initialized: true,
+      dbReady: true,
+      authEnabled: true
+    });
+
+    const statusUnauthed = await runtime.app.inject({ method: "GET", url: "/api/v1/auth/status" });
+    expect(statusUnauthed.statusCode).toBe(200);
+    expect(statusUnauthed.json()).toMatchObject({
+      authEnabled: true,
+      authenticated: false
+    });
+
+    const unauthDash = await runtime.app.inject({ method: "GET", url: "/api/v1/dashboard" });
+    expect(unauthDash.statusCode).toBe(401);
+
+    const noCsrfLogin = await runtime.app.inject({
+      method: "POST",
+      url: "/api/v1/auth/login",
+      payload: { accessCode: "SecretCode2026!" }
+    });
+    expect(noCsrfLogin.statusCode).toBe(403);
+
+    const wrongLogin = await runtime.app.inject({
+      method: "POST",
+      url: "/api/v1/auth/login",
+      headers: { "x-assetnest-request": "1" },
+      payload: { accessCode: "WrongCode" }
+    });
+    expect(wrongLogin.statusCode).toBe(401);
+
+    const loginRes = await runtime.app.inject({
+      method: "POST",
+      url: "/api/v1/auth/login",
+      headers: { "x-assetnest-request": "1" },
+      payload: { accessCode: "SecretCode2026!" }
+    });
+    expect(loginRes.statusCode).toBe(200);
+    const sessionCookie = extractCookie(loginRes.headers["set-cookie"]);
+    expect(sessionCookie).toContain("assetnest_session=");
+
+    const statusAuthed = await runtime.app.inject({
+      method: "GET",
+      url: "/api/v1/auth/status",
+      headers: { cookie: sessionCookie }
+    });
+    expect(statusAuthed.json()).toMatchObject({
+      authEnabled: true,
+      authenticated: true
+    });
+
     const patchSettings = await runtime.app.inject({
       method: "PATCH",
       url: "/api/v1/settings",
@@ -115,10 +194,29 @@ describe("M0 API end-to-end foundation", () => {
       payload: { trashRetentionDays: 45, appTimezone: "Asia/Bangkok" }
     });
     expect(patchSettings.statusCode).toBe(200);
-    expect(patchSettings.json().trashRetentionDays).toBe(45);
-    expect(patchSettings.json().appTimezone).toBe("Asia/Bangkok");
 
-    const logoutRes = await runtime.app.inject({
+    // Restart with the SAME access code -> session remains valid
+    await runtime.close();
+    runtimes.pop();
+
+    const restartedSameCode = await createApp({
+      config,
+      logger: false,
+      loginRateLimitMax: 5
+    });
+    runtimes.push(restartedSameCode);
+
+    const settingsAfter = await restartedSameCode.app.inject({
+      method: "GET",
+      url: "/api/v1/settings",
+      headers: { cookie: sessionCookie }
+    });
+    expect(settingsAfter.statusCode).toBe(200);
+    expect(settingsAfter.json().trashRetentionDays).toBe(45);
+    expect(settingsAfter.json().appTimezone).toBe("Asia/Bangkok");
+
+    // Logout revokes the session
+    const logoutRes = await restartedSameCode.app.inject({
       method: "POST",
       url: "/api/v1/auth/logout",
       headers: { cookie: sessionCookie, "x-assetnest-request": "1" },
@@ -126,68 +224,63 @@ describe("M0 API end-to-end foundation", () => {
     });
     expect(logoutRes.statusCode).toBe(200);
 
-    const afterLogoutMe = await runtime.app.inject({
+    const afterLogoutMe = await restartedSameCode.app.inject({
       method: "GET",
       url: "/api/v1/auth/me",
       headers: { cookie: sessionCookie }
     });
     expect(afterLogoutMe.statusCode).toBe(401);
 
-    await runtime.close();
+    // Log in again before rotating access code
+    const loginAgain = await restartedSameCode.app.inject({
+      method: "POST",
+      url: "/api/v1/auth/login",
+      headers: { "x-assetnest-request": "1" },
+      payload: { accessCode: "SecretCode2026!" }
+    });
+    expect(loginAgain.statusCode).toBe(200);
+    const preRotateCookie = extractCookie(loginAgain.headers["set-cookie"]);
+
+    await restartedSameCode.close();
     runtimes.pop();
 
-    const restarted = await createApp({
-      config,
+    // Restart with a ROTATED access code -> old session & old code are immediately rejected
+    const rotatedConfig = loadConfig({
+      cwd: dir,
+      env: {
+        ASSETNEST_DATA_DIR: dataDir,
+        ASSETNEST_ACCESS_CODE: "NewRotatedCode99!"
+      }
+    });
+    const restartedRotated = await createApp({
+      config: rotatedConfig,
       logger: false,
       loginRateLimitMax: 5
     });
-    runtimes.push(restarted);
+    runtimes.push(restartedRotated);
 
-    const healthAfter = await restarted.app.inject({ method: "GET", url: "/healthz" });
-    expect(healthAfter.json().initialized).toBe(true);
-
-    const loginRes = await restarted.app.inject({
-      method: "POST",
-      url: "/api/v1/auth/login",
-      headers: { "x-assetnest-request": "1" },
-      payload: { username: "admin", password: "Password123!" }
-    });
-    expect(loginRes.statusCode).toBe(200);
-    const newCookie = extractCookie(loginRes.headers["set-cookie"]);
-
-    const settingsAfter = await restarted.app.inject({
-      method: "GET",
-      url: "/api/v1/settings",
-      headers: { cookie: newCookie }
-    });
-    expect(settingsAfter.statusCode).toBe(200);
-    expect(settingsAfter.json().trashRetentionDays).toBe(45);
-    expect(settingsAfter.json().appTimezone).toBe("Asia/Bangkok");
-
-    await resetAdminPasswordCli(restarted.db, "admin", "NewHostResetPass99!");
-
-    const revokedCheck = await restarted.app.inject({
+    const oldSessionCheck = await restartedRotated.app.inject({
       method: "GET",
       url: "/api/v1/auth/me",
-      headers: { cookie: newCookie }
+      headers: { cookie: preRotateCookie }
     });
-    expect(revokedCheck.statusCode).toBe(401);
+    expect(oldSessionCheck.statusCode).toBe(401);
 
-    const oldPassLogin = await restarted.app.inject({
+    const oldCodeLogin = await restartedRotated.app.inject({
       method: "POST",
       url: "/api/v1/auth/login",
       headers: { "x-assetnest-request": "1" },
-      payload: { username: "admin", password: "Password123!" }
+      payload: { accessCode: "SecretCode2026!" }
     });
-    expect(oldPassLogin.statusCode).toBe(401);
+    expect(oldCodeLogin.statusCode).toBe(401);
 
-    const newPassLogin = await restarted.app.inject({
+    const newCodeLogin = await restartedRotated.app.inject({
       method: "POST",
       url: "/api/v1/auth/login",
       headers: { "x-assetnest-request": "1" },
-      payload: { username: "admin", password: "NewHostResetPass99!" }
+      payload: { accessCode: "NewRotatedCode99!" }
     });
-    expect(newPassLogin.statusCode).toBe(200);
+    expect(newCodeLogin.statusCode).toBe(200);
   });
 
   it("enforces login rate limiting and marks removed config providers as missing_config", async () => {
@@ -215,12 +308,9 @@ storage:
       "utf8"
     );
 
-    const r1 = await createApp({ config: loadConfig({ configPath: cfg1Path, env: {} }), logger: false });
-    await r1.app.inject({
-      method: "POST",
-      url: "/api/v1/setup/init",
-      headers: { "x-assetnest-request": "1" },
-      payload: { username: "admin", displayName: "管理员", password: "Password123!" }
+    const r1 = await createApp({
+      config: loadConfig({ configPath: cfg1Path, env: { ASSETNEST_ACCESS_CODE: "RateCode123!" } }),
+      logger: false
     });
     await r1.close();
 
@@ -241,39 +331,50 @@ storage:
     );
 
     const r2 = await createApp({
-      config: loadConfig({ configPath: cfg2Path, env: {} }),
+      config: loadConfig({ configPath: cfg2Path, env: { ASSETNEST_ACCESS_CODE: "RateCode123!" } }),
       logger: false,
       loginRateLimitMax: 2
     });
     runtimes.push(r2);
-
-    const status = await r2.app.inject({ method: "GET", url: "/api/v1/setup/status" });
-    const providers = status.json().providersSummary as Array<{ id: string; status: string }>;
-    const missing = providers.find((p) => p.id === "archive_nas");
-    expect(missing).toBeDefined();
-    expect(missing?.status).toBe("missing_config");
 
     // Trigger login rate limit after 2 failed attempts
     const a1 = await r2.app.inject({
       method: "POST",
       url: "/api/v1/auth/login",
       headers: { "x-assetnest-request": "1" },
-      payload: { username: "admin", password: "wrong" }
+      payload: { accessCode: "wrong" }
     });
     const a2 = await r2.app.inject({
       method: "POST",
       url: "/api/v1/auth/login",
       headers: { "x-assetnest-request": "1" },
-      payload: { username: "admin", password: "wrong" }
+      payload: { accessCode: "wrong" }
     });
     const a3 = await r2.app.inject({
       method: "POST",
       url: "/api/v1/auth/login",
       headers: { "x-assetnest-request": "1" },
-      payload: { username: "admin", password: "wrong" }
+      payload: { accessCode: "wrong" }
     });
     expect(a1.statusCode).toBe(401);
     expect(a2.statusCode).toBe(401);
     expect(a3.statusCode).toBe(429);
+
+    await r2.close();
+    runtimes.pop();
+
+    // Reopen without access code to verify missing_config provider status directly
+    const r3 = await createApp({
+      config: loadConfig({ configPath: cfg2Path, env: {} }),
+      logger: false
+    });
+    runtimes.push(r3);
+
+    const providersRes = await r3.app.inject({ method: "GET", url: "/api/v1/storage/providers" });
+    expect(providersRes.statusCode).toBe(200);
+    const providers = providersRes.json().items as Array<{ id: string; status: string }>;
+    const missing = providers.find((p) => p.id === "archive_nas");
+    expect(missing).toBeDefined();
+    expect(missing?.status).toBe("missing_config");
   });
 });

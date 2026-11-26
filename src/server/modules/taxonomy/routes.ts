@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import type { ResolvedAppConfig } from "../../config/schema.js";
 import type { AppDatabase } from "../../db/database.js";
 import { createRequireAuthHook } from "../../http/security.js";
 import {
@@ -38,8 +39,12 @@ const updateTagSchema = z.object({
   parentId: z.string().uuid().nullable().optional()
 });
 
-export function registerTaxonomyRoutes(app: FastifyInstance, db: AppDatabase): void {
-  const requireAuth = createRequireAuthHook(db);
+export function registerTaxonomyRoutes(
+  app: FastifyInstance,
+  db: AppDatabase,
+  config: ResolvedAppConfig
+): void {
+  const requireAuth = createRequireAuthHook(db, config);
 
   app.get("/api/v1/folders", { preHandler: requireAuth }, async () => {
     return { items: listFolders(db) };

@@ -1,5 +1,6 @@
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
+import type { ResolvedAppConfig } from "../../config/schema.js";
 import type { AppDatabase } from "../../db/database.js";
 import { createRequireAuthHook } from "../../http/security.js";
 import type { JobWorker } from "../jobs/worker.js";
@@ -20,9 +21,10 @@ const gcRequestSchema = z
 export function registerTrashRoutes(
   app: FastifyInstance,
   db: AppDatabase,
+  config: ResolvedAppConfig,
   worker: JobWorker
 ): void {
-  const requireAuth = createRequireAuthHook(db);
+  const requireAuth = createRequireAuthHook(db, config);
 
   app.get("/api/v1/trash", { preHandler: requireAuth }, async () => {
     return listTrash(db);
