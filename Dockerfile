@@ -1,8 +1,12 @@
 FROM node:22-bookworm-slim AS builder
 
+ARG NPM_REGISTRY=""
+
 WORKDIR /app
 
-RUN npm install -g pnpm@12.21.0
+RUN if [ -n "$NPM_REGISTRY" ]; then npm config set registry "$NPM_REGISTRY"; fi \
+  && npm install -g pnpm@12.21.0 \
+  && if [ -n "$NPM_REGISTRY" ]; then pnpm config set registry "$NPM_REGISTRY"; fi
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 RUN pnpm install --frozen-lockfile

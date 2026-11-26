@@ -16,6 +16,9 @@ import type {
   DictionariesResponse,
   DictionaryCategory,
   DictionaryRecord,
+  ExportRecord,
+  ExportTemplateRecord,
+  ExportTemplateRules,
   FolderRecord,
   JobRecord,
   ListingAssetSetsResponse,
@@ -23,6 +26,7 @@ import type {
   ListingPdpResponse,
   ListingStatus,
   ListingSummary,
+  ListingValidationResult,
   MigrationPreviewResponse,
   MigrationScopeInput,
   PaginatedResponse,
@@ -33,6 +37,9 @@ import type {
   ProductSpec,
   ProductStatus,
   ProductSummary,
+  ReleaseDetail,
+  ReleaseSummary,
+  RestoreBackupResult,
   ReviewStatus,
   SetupStatusResponse,
   SkuRecord,
@@ -839,5 +846,160 @@ export const api = {
       method: "POST",
       body: JSON.stringify(payload)
     });
+  },
+
+  // M4: Export templates, preflight validation, immutable releases, exports & restore
+  listExportTemplates(params?: {
+    platform?: string;
+    market?: string;
+  }): Promise<{ items: ExportTemplateRecord[] }> {
+    const sp = new URLSearchParams();
+    if (params?.platform) sp.set("platform", params.platform);
+    if (params?.market) sp.set("market", params.market);
+    const qs = sp.toString();
+    return requestJson(`/api/v1/export-templates${qs ? `?${qs}` : ""}`);
+  },
+  createExportTemplate(payload: {
+    name: string;
+    platform: string;
+    market: string;
+    isDefault?: boolean;
+    rules: ExportTemplateRules;
+  }): Promise<ExportTemplateRecord> {
+    return requestJson("/api/v1/export-templates", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  },
+  updateExportTemplate(
+    id: string,
+    payload: {
+      name?: string;
+      platform?: string;
+      market?: string;
+      isDefault?: boolean;
+      rules?: ExportTemplateRules;
+    }
+  ): Promise<ExportTemplateRecord> {
+    return requestJson(`/api/v1/export-templates/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    });
+  },
+  validateListing(listingId: string, templateId?: string): Promise<ListingValidationResult> {
+    return requestJson(`/api/v1/listings/${encodeURIComponent(listingId)}/validate`, {
+      method: "POST",
+      body: JSON.stringify(templateId ? { templateId } : {})
+    });
+  },
+  createRelease(
+    listingId: string,
+    payload: { templateId?: string; isDraftPackage?: boolean; note?: string }
+  ): Promise<ReleaseDetail> {
+    return requestJson(`/api/v1/listings/${encodeURIComponent(listingId)}/releases`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  },
+  listListingReleases(listingId: string): Promise<{ items: ReleaseSummary[] }> {
+    return requestJson(`/api/v1/listings/${encodeURIComponent(listingId)}/releases`);
+  },
+  getReleaseDetail(releaseId: string): Promise<ReleaseDetail> {
+    return requestJson(`/api/v1/releases/${encodeURIComponent(releaseId)}`);
+  },
+  restoreReleaseDraft(
+    releaseId: string,
+    payload: { displayName?: string; storeId?: string } = {}
+  ): Promise<ListingDetail> {
+    return requestJson(`/api/v1/releases/${encodeURIComponent(releaseId)}/restore-draft`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  },
+  enqueueReleaseExport(
+    releaseId: string
+  ): Promise<{ exportRecord: ExportRecord; job: JobRecord }> {
+    return requestJson(`/api/v1/releases/${encodeURIComponent(releaseId)}/exports`, {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+  },
+  exportDownloadUrl(exportId: string): string {
+    return `/api/v1/exports/${encodeURIComponent(exportId)}/download`;
+  },
+  async downloadStandardOpenExport(payload: {
+    productId?: string;
+    assetIds?: string[];
+    includeAllVersions?: boolean;
+  }): Promise<void> {
+    const res = await fetch("/api/v1/assets/export-standard", {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        "Content-Type": "application/json",
+        "X-AssetNest-Request": "1"
+      },
+      body: JSON.stringify(payload)
+    });
+    if (!res.ok) {
+      const errBody = (await res.json().catch(() => null)) as ApiErrorBody | null;
+      throw new ApiClientError(
+        res.status,
+        errBody?.error?.code ?? "INTERNAL_ERROR",
+        errBody?.error?.message ?? `导出失败 (${res.status})`
+      );
+    }
+    const disposition = res.headers.get("content-disposition") || "";
+    const match = disposition.match(/filename="([^"]+)"/);
+    const fileName = match?.[1] || `assetnest-open-export-${Date.now()}.zip`;
+    const blob = await res.blob();
+    const objectUrl = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = objectUrl;
+    link.download = fileName;
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    URL.revokeObjectURL(objectUrl);
+  },
+  restoreBackupById(
+    backupId: string,
+    targetStorageMapping?: Record<string, string>
+  ): Promise<RestoreBackupResult> {
+    return requestJson("/api/v1/backups/restore", {
+      method: "POST",
+      body: JSON.stringify({ backupId, targetStorageMapping })
+    });
+  },
+  async restoreBackupUpload(
+    file: File,
+    targetStorageMapping?: Record<string, string>
+  ): Promise<RestoreBackupResult> {
+    const form = new FormData();
+    form.append("file", file);
+    if (targetStorageMapping && Object.keys(targetStorageMapping).length > 0) {
+      form.append("targetStorageMapping", JSON.stringify(targetStorageMapping));
+    }
+    const res = await fetch("/api/v1/backups/restore", {
+      method: "POST",
+      credentials: "include",
+      headers: {
+        "X-AssetNest-Request": "1"
+      },
+      body: form
+    });
+    const data = (await res.json().catch(() => null)) as
+      | RestoreBackupResult
+      | ApiErrorBody
+      | null;
+    if (!res.ok) {
+      const errBody = data as ApiErrorBody | null;
+      throw new ApiClientError(
+        res.status,
+        errBody?.error?.code ?? "INTERNAL_ERROR",
+        errBody?.error?.message ?? `恢复失败 (${res.status})`
+      );
+    }
+    return data as RestoreBackupResult;
   }
 };

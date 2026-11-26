@@ -139,6 +139,10 @@ export class JobWorker {
     this.wake();
   }
 
+  public isRunning(): boolean {
+    return this.started && !this.stopping;
+  }
+
   public wake(): void {
     if (this.stopping) {
       return;

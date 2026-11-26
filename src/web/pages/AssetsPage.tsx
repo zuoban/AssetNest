@@ -129,6 +129,7 @@ export function AssetsPage() {
   // Upload state
   const [draggingOver, setDraggingOver] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [exportingStandard, setExportingStandard] = useState(false);
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const [uploadTargetProductId, setUploadTargetProductId] = useState("");
   const [uploadTargetFolderId, setUploadTargetFolderId] = useState("");
@@ -598,6 +599,32 @@ export function AssetsPage() {
     return <ImageIcon className="h-7 w-7 text-gray-400" />;
   };
 
+  const handleStandardOpenExport = async () => {
+    setExportingStandard(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const payload =
+        selectedIds.size > 0
+          ? { assetIds: Array.from(selectedIds), includeAllVersions: false }
+          : productId
+            ? { productId, includeAllVersions: false }
+            : { includeAllVersions: false };
+      await api.downloadStandardOpenExport(payload);
+      setNotice(
+        selectedIds.size > 0
+          ? `已导出所选 ${selectedIds.size} 个素材的开放标准 ZIP 包（含 manifest.json）`
+          : productId
+            ? "已导出当前筛选商品的开放标准 ZIP 包（含 manifest.json）"
+            : "已导出开放标准 ZIP 包（含 manifest.json）"
+      );
+    } catch (err) {
+      setError(err instanceof ApiClientError ? err.message : "导出开放标准包失败");
+    } finally {
+      setExportingStandard(false);
+    }
+  };
+
   return (
     <div className="space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-2">
@@ -620,6 +647,21 @@ export function AssetsPage() {
           >
             <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
             <span>刷新</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleStandardOpenExport()}
+            disabled={exportingStandard || total === 0}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+          >
+            <Download className="h-3.5 w-3.5" />
+            <span>
+              {exportingStandard
+                ? "正在打包..."
+                : selectedIds.size > 0
+                  ? `导出开放标准包 (${selectedIds.size})`
+                  : "导出开放标准包"}
+            </span>
           </button>
           <button
             type="button"

@@ -12,9 +12,9 @@ import type {
 import type { AppDatabase } from "../../db/database.js";
 import { AppError } from "../../http/errors.js";
 import {
+  buildEntitySearchClause,
   rebuildProductLinkedAssetSearchDocuments,
-  rebuildProductSearchDocument,
-  searchEntityIds
+  rebuildProductSearchDocument
 } from "../search/service.js";
 import { recordActivity } from "../system/activity.js";
 
@@ -195,13 +195,14 @@ export function listProducts(
   }
 
   if (query.q && query.q.trim().length > 0) {
-    const matchedIds = searchEntityIds(db, "product", query.q);
-    if (matchedIds.length === 0) {
-      return { items: [], total: 0, page: query.page, pageSize: query.pageSize };
+    const searchPredicate = buildEntitySearchClause(db, "product", "p.id", query.q);
+    if (searchPredicate) {
+      if (searchPredicate.empty) {
+        return { items: [], total: 0, page: query.page, pageSize: query.pageSize };
+      }
+      clauses.push(searchPredicate.clause);
+      params.push(...searchPredicate.params);
     }
-    const placeholders = matchedIds.map(() => "?").join(", ");
-    clauses.push(`p.id IN (${placeholders})`);
-    params.push(...matchedIds);
   }
 
   const whereSql = clauses.join(" AND ");

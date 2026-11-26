@@ -663,3 +663,179 @@ export interface ListingPdpResponse {
   productSpecs: PdpSpecRow[];
   specDiff: PdpSpecDiffItem[];
 }
+
+// M4: Export templates, preflight validation, immutable releases, exports & restore
+
+export type PdpRequiredField =
+  | "title"
+  | "shortDescription"
+  | "bullets"
+  | "description"
+  | "specs"
+  | "packageList"
+  | "usageInstructions";
+
+export interface ExportTemplateRules {
+  folders: {
+    carousel: string;
+    sku: string;
+    detail: string;
+    video: string;
+    pdp: string;
+  };
+  carousel: {
+    minCount: number;
+    targetCount: number;
+    maxCount: number;
+    aspectRatio: string;
+    aspectTolerance: number;
+    minWidth: number;
+    minHeight: number;
+    maxFileSizeMB: number;
+    allowedExts: string[];
+  };
+  detail: {
+    minCount: number;
+    maxCount: number;
+    aspectRatio: string;
+    aspectTolerance: number;
+    minWidth: number;
+    minHeight: number;
+    maxFileSizeMB: number;
+    allowedExts: string[];
+  };
+  sku: {
+    required: boolean;
+    minWidth: number;
+    minHeight: number;
+    maxFileSizeMB: number;
+    allowedExts: string[];
+  };
+  video: {
+    maxCount: number;
+    maxFileSizeMB: number;
+    allowedExts: string[];
+  };
+  pdp: {
+    maxTitleCodePoints: number;
+    requiredFields: PdpRequiredField[];
+  };
+  review: {
+    requireApprovedForFormal: boolean;
+  };
+  naming: {
+    carouselPrefix: string;
+    mainImageName: string;
+    detailPrefix: string;
+    videoPrefix: string;
+  };
+}
+
+export interface ExportTemplateRecord {
+  id: string;
+  name: string;
+  platform: string;
+  market: string;
+  version: number;
+  isDefault: boolean;
+  rules: ExportTemplateRules;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ValidationIssue {
+  severity: "blocker" | "warning";
+  code: string;
+  message: string;
+  targetKind?: "carousel" | "detail" | "sku" | "video" | "pdp" | "storage" | "listing";
+  targetId?: string | null;
+  details?: Record<string, unknown>;
+}
+
+export interface ListingValidationResult {
+  listingId: string;
+  templateId: string;
+  templateName: string;
+  templateVersion: number;
+  canCreateFormalRelease: boolean;
+  checkedAt: string;
+  blockers: ValidationIssue[];
+  warnings: ValidationIssue[];
+  stats: {
+    carouselCount: number;
+    detailCount: number;
+    skuTotalCount: number;
+    skuBoundCount: number;
+    videoCount: number;
+    titleCodePoints: number;
+  };
+}
+
+export interface ReleaseAssetRecord {
+  id: string;
+  releaseId: string;
+  assetVersionId: string;
+  kind: AssetSetKind;
+  listingSkuCode: string | null;
+  position: number;
+  exportRelativePath: string;
+  sha256: string;
+  sizeBytes: number;
+  originalFilename?: string;
+  versionNo?: number;
+  storageId?: string;
+}
+
+export type ExportStatus = "queued" | "running" | "ready" | "expired" | "failed";
+
+export interface ExportRecord {
+  id: string;
+  releaseId: string;
+  jobId: string | null;
+  status: ExportStatus;
+  fileName: string;
+  sizeBytes: number | null;
+  expiresAt: string | null;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ReleaseSummary {
+  id: string;
+  listingId: string;
+  releaseNo: number;
+  releaseCode: string;
+  isDraftPackage: boolean;
+  templateId: string;
+  templateName: string;
+  templateVersion: number;
+  pdpVersionId: string | null;
+  note: string;
+  assetCount: number;
+  blockerCount: number;
+  warningCount: number;
+  latestExport: ExportRecord | null;
+  createdAt: string;
+}
+
+export interface ReleaseDetail extends ReleaseSummary {
+  validationSummary: ListingValidationResult;
+  snapshot: Record<string, unknown>;
+  assets: ReleaseAssetRecord[];
+  exports: ExportRecord[];
+}
+
+export interface RestoreBackupResult {
+  backupId: string;
+  kind: BackupKind;
+  schemaVersion: number;
+  restoredFileCount: number;
+  reusedFileCount: number;
+  reindexed: {
+    products: number;
+    assets: number;
+    listings: number;
+  };
+  restoredAt: string;
+}

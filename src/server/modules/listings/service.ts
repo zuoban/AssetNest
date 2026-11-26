@@ -9,7 +9,7 @@ import type {
 } from "../../../shared/types.js";
 import type { AppDatabase } from "../../db/database.js";
 import { AppError } from "../../http/errors.js";
-import { rebuildListingSearchDocument, searchEntityIds } from "../search/service.js";
+import { buildEntitySearchClause, rebuildListingSearchDocument } from "../search/service.js";
 import { recordActivity } from "../system/activity.js";
 import { ASSET_SET_KINDS, ensureListingAssetSetsInTx } from "./asset-sets.js";
 import { createEmptyPdpContent, parsePdpContentJson } from "./pdp.js";
@@ -150,13 +150,14 @@ export function listListings(
     params.push(query.status);
   }
   if (query.q && query.q.trim()) {
-    const matchedIds = searchEntityIds(db, "listing", query.q);
-    if (matchedIds.length === 0) {
-      return { items: [], total: 0, page: query.page, pageSize: query.pageSize };
+    const searchPredicate = buildEntitySearchClause(db, "listing", "l.id", query.q);
+    if (searchPredicate) {
+      if (searchPredicate.empty) {
+        return { items: [], total: 0, page: query.page, pageSize: query.pageSize };
+      }
+      clauses.push(searchPredicate.clause);
+      params.push(...searchPredicate.params);
     }
-    const placeholders = matchedIds.map(() => "?").join(", ");
-    clauses.push(`l.id IN (${placeholders})`);
-    params.push(...matchedIds);
   }
 
   const whereSql = clauses.join(" AND ");

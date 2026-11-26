@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import {
   AlertCircle,
@@ -7,9 +7,16 @@ import {
   Database,
   Download,
   Eraser,
-  RefreshCw
+  RefreshCw,
+  RotateCcw,
+  Upload
 } from "lucide-react";
-import type { AppSettings, BackupKind, BackupRecord } from "../../shared/types";
+import type {
+  AppSettings,
+  BackupKind,
+  BackupRecord,
+  RestoreBackupResult
+} from "../../shared/types";
 import { api, ApiClientError } from "../api/client";
 import { formatBytes, formatDateTime } from "../utils/format";
 
@@ -25,9 +32,12 @@ export function SettingsPage({ onTimezoneChanged }: SettingsPageProps) {
   const [appTimezone, setAppTimezone] = useState("Asia/Shanghai");
   const [saving, setSaving] = useState(false);
   const [creatingBackup, setCreatingBackup] = useState<BackupKind | null>(null);
+  const [restoringBackup, setRestoringBackup] = useState(false);
+  const [restoreResult, setRestoreResult] = useState<RestoreBackupResult | null>(null);
   const [clearingCache, setClearingCache] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
+  const restoreFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const load = useCallback(async () => {
     setError(null);
@@ -70,6 +80,67 @@ export function SettingsPage({ onTimezoneChanged }: SettingsPageProps) {
       setError(err instanceof ApiClientError ? err.message : "创建备份任务失败");
     } finally {
       setCreatingBackup(null);
+    }
+  };
+
+  const handleRestoreById = async (backup: BackupRecord) => {
+    const confirmed = window.confirm(
+      `确认从备份 ${backup.id.slice(0, 8)}（${backup.kind === "full" ? "完整备份" : "元数据备份"}）进入维护模式恢复？\n` +
+        "恢复前将自动校验 SHA-256 与数据库完整性，并在覆盖当前库之前保留 .pre-restore 自动回滚点。"
+    );
+    if (!confirmed) return;
+    setRestoringBackup(true);
+    setError(null);
+    setSavedMsg(null);
+    setRestoreResult(null);
+    try {
+      const res = await api.restoreBackupById(backup.id);
+      setRestoreResult(res);
+      const totalIndexed =
+        res.reindexed.products + res.reindexed.assets + res.reindexed.listings;
+      setSavedMsg(
+        `备份恢复成功：已校验并切换数据库（Schema v${res.schemaVersion}），恢复 ${res.restoredFileCount} 个物理文件，重建 ${totalIndexed} 条 FTS 索引。`
+      );
+      await load();
+      if (onTimezoneChanged) {
+        await onTimezoneChanged();
+      }
+    } catch (err) {
+      setError(err instanceof ApiClientError ? err.message : "从备份恢复失败");
+    } finally {
+      setRestoringBackup(false);
+    }
+  };
+
+  const handleRestoreFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    event.target.value = "";
+    if (!file) return;
+    const confirmed = window.confirm(
+      `确认上传并从备份包「${file.name}」进入维护模式恢复？\n` +
+        "校验不通过时将直接拒绝并保持当前实例数据完好无损。"
+    );
+    if (!confirmed) return;
+    setRestoringBackup(true);
+    setError(null);
+    setSavedMsg(null);
+    setRestoreResult(null);
+    try {
+      const res = await api.restoreBackupUpload(file);
+      setRestoreResult(res);
+      const totalIndexed =
+        res.reindexed.products + res.reindexed.assets + res.reindexed.listings;
+      setSavedMsg(
+        `上传备份恢复成功：已切换数据库（Schema v${res.schemaVersion}），恢复 ${res.restoredFileCount} 个物理文件，重建 ${totalIndexed} 条 FTS 索引。`
+      );
+      await load();
+      if (onTimezoneChanged) {
+        await onTimezoneChanged();
+      }
+    } catch (err) {
+      setError(err instanceof ApiClientError ? err.message : "上传备份包恢复失败");
+    } finally {
+      setRestoringBackup(false);
     }
   };
 
@@ -243,6 +314,22 @@ export function SettingsPage({ onTimezoneChanged }: SettingsPageProps) {
               <Archive className="h-3.5 w-3.5" />
               <span>{creatingBackup === "full" ? "提交中..." : "创建完整备份（含原文件）"}</span>
             </button>
+            <input
+              ref={restoreFileInputRef}
+              type="file"
+              accept=".zip,application/zip"
+              onChange={(e) => void handleRestoreFileChange(e)}
+              className="hidden"
+            />
+            <button
+              type="button"
+              disabled={restoringBackup}
+              onClick={() => restoreFileInputRef.current?.click()}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-amber-300 bg-amber-50 px-3 py-1.5 text-xs font-medium text-amber-800 hover:bg-amber-100 disabled:opacity-50"
+            >
+              <Upload className="h-3.5 w-3.5" />
+              <span>{restoringBackup ? "维护模式恢复中..." : "上传 ZIP 恢复"}</span>
+            </button>
             <button
               type="button"
               onClick={() => void load()}
@@ -252,6 +339,23 @@ export function SettingsPage({ onTimezoneChanged }: SettingsPageProps) {
             </button>
           </div>
         </div>
+
+        {restoreResult && (
+          <div className="rounded-lg border border-emerald-200 bg-emerald-50/70 p-3 text-xs text-emerald-900">
+            <div className="font-semibold">维护模式恢复完成</div>
+            <div className="mt-1 grid grid-cols-2 gap-2 font-mono-tabular text-[11px] sm:grid-cols-4">
+              <div>备份类型：{restoreResult.kind === "full" ? "完整备份" : "元数据备份"}</div>
+              <div>Schema：v{restoreResult.schemaVersion}</div>
+              <div>
+                已恢复文件：{restoreResult.restoredFileCount}（复用 {restoreResult.reusedFileCount}）
+              </div>
+              <div>
+                重建索引：{restoreResult.reindexed.products} 商品 / {restoreResult.reindexed.assets} 素材 /{" "}
+                {restoreResult.reindexed.listings} 上架
+              </div>
+            </div>
+          </div>
+        )}
 
         {backups.length === 0 ? (
           <div className="rounded-lg border border-dashed border-gray-200 py-8 text-center text-xs text-gray-400">
@@ -267,7 +371,7 @@ export function SettingsPage({ onTimezoneChanged }: SettingsPageProps) {
                   <th className="px-3 py-2.5">Schema / 文件数</th>
                   <th className="px-3 py-2.5">体积 / SHA-256</th>
                   <th className="px-3 py-2.5">创建时间</th>
-                  <th className="px-3 py-2.5 text-right">下载</th>
+                  <th className="px-3 py-2.5 text-right">操作</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-gray-100">
@@ -319,13 +423,24 @@ export function SettingsPage({ onTimezoneChanged }: SettingsPageProps) {
                     </td>
                     <td className="px-3 py-2.5 text-right">
                       {item.status === "ready" ? (
-                        <a
-                          href={api.backupDownloadUrl(item.id)}
-                          className="inline-flex items-center gap-1 rounded-md border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] font-medium text-blue-700 hover:bg-blue-100"
-                        >
-                          <Download className="h-3 w-3" />
-                          <span>下载 ZIP</span>
-                        </a>
+                        <div className="inline-flex items-center justify-end gap-1.5">
+                          <a
+                            href={api.backupDownloadUrl(item.id)}
+                            className="inline-flex items-center gap-1 rounded-md border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] font-medium text-blue-700 hover:bg-blue-100"
+                          >
+                            <Download className="h-3 w-3" />
+                            <span>下载 ZIP</span>
+                          </a>
+                          <button
+                            type="button"
+                            disabled={restoringBackup}
+                            onClick={() => void handleRestoreById(item)}
+                            className="inline-flex items-center gap-1 rounded-md border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-800 hover:bg-amber-100 disabled:opacity-50"
+                          >
+                            <RotateCcw className="h-3 w-3" />
+                            <span>恢复</span>
+                          </button>
+                        </div>
                       ) : (
                         <Link to="/jobs" className="text-[11px] text-blue-600 hover:underline">
                           查看任务

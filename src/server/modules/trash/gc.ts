@@ -7,6 +7,7 @@ import type { StorageRegistry } from "../../storage/registry.js";
 import { enqueueJob } from "../jobs/service.js";
 import type { JobContext, JobWorker } from "../jobs/worker.js";
 import { buildThumbnailRelPath, resolveThumbnailAbsPath } from "../media/thumbnail.js";
+import { resolveExportZipPath } from "../releases/exporter.js";
 import { removeSearchDocument } from "../search/service.js";
 import { recordActivity } from "../system/activity.js";
 
@@ -339,6 +340,36 @@ export async function executeGcJob(
     );
   }
 
+  // Clean expired ZIP artifacts in exports table without ever deleting immutable releases
+  let expiredExportsCleaned = 0;
+  if (tableExists(db, "exports")) {
+    const nowIso = new Date().toISOString();
+    const expiredExports = db.raw
+      .prepare(
+        `SELECT id, file_path
+         FROM exports
+         WHERE file_path IS NOT NULL
+           AND (
+             status = 'expired'
+             OR (status = 'ready' AND expires_at IS NOT NULL AND expires_at <= ?)
+           )`
+      )
+      .all(nowIso) as Array<{ id: string; file_path: string }>;
+
+    for (const exp of expiredExports) {
+      try {
+        const absPath = resolveExportZipPath(config, exp.file_path);
+        await fsp.rm(absPath, { force: true });
+        db.raw
+          .prepare("UPDATE exports SET status = 'expired', file_path = NULL, updated_at = ? WHERE id = ?")
+          .run(nowIso, exp.id);
+        expiredExportsCleaned += 1;
+      } catch {
+        // ignore single export cleanup failure
+      }
+    }
+  }
+
   return {
     retentionDays,
     forceIgnoreRetention,
@@ -347,6 +378,7 @@ export async function executeGcJob(
     purgedProducts,
     skippedProtectedProducts,
     deletedFiles,
-    freedBytes
+    freedBytes,
+    expiredExportsCleaned
   };
 }

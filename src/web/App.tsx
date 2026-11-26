@@ -15,6 +15,7 @@ import { SettingsPage } from "./pages/SettingsPage";
 import { SetupPage } from "./pages/SetupPage";
 import { StoragePage } from "./pages/StoragePage";
 import { StoresPage } from "./pages/StoresPage";
+import { TemplatesPage } from "./pages/TemplatesPage";
 import { TrashPage } from "./pages/TrashPage";
 
 export function App() {
@@ -101,6 +102,7 @@ export function App() {
           <Route path="/products/:id" element={<ProductDetailPage />} />
           <Route path="/listings" element={<ListingsPage />} />
           <Route path="/listings/:id" element={<ListingWorkbenchPage />} />
+          <Route path="/templates" element={<TemplatesPage />} />
           <Route path="/stores" element={<StoresPage />} />
           <Route path="/assets" element={<AssetsPage />} />
           <Route path="/trash" element={<TrashPage />} />

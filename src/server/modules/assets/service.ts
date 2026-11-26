@@ -32,7 +32,7 @@ import {
   isValidThumbnailFile,
   resolveThumbnailAbsPath
 } from "../media/thumbnail.js";
-import { rebuildAssetSearchDocument, searchEntityIds } from "../search/service.js";
+import { buildEntitySearchClause, rebuildAssetSearchDocument } from "../search/service.js";
 import { recordActivity } from "../system/activity.js";
 
 export interface StagedUploadFile {
@@ -534,19 +534,18 @@ export function listAssets(
   const params: Array<string | number> = [];
 
   if (query.q && query.q.trim().length > 0) {
-    const matchedIds = searchEntityIds(db, "asset", query.q);
-    if (matchedIds.length === 0) {
-      return { items: [], total: 0, page: query.page, pageSize: query.pageSize };
+    const searchPredicate = buildEntitySearchClause(db, "asset", "a.id", query.q);
+    if (searchPredicate) {
+      if (searchPredicate.empty) {
+        return { items: [], total: 0, page: query.page, pageSize: query.pageSize };
+      }
+      clauses.push(searchPredicate.clause);
+      params.push(...searchPredicate.params);
     }
-    const placeholders = matchedIds.map(() => "?").join(", ");
-    clauses.push(`a.id IN (${placeholders})`);
-    params.push(...matchedIds);
   }
 
   if (query.productId) {
-    clauses.push(
-      "EXISTS (SELECT 1 FROM product_assets pa WHERE pa.asset_id = a.id AND pa.product_id = ?)"
-    );
+    clauses.push("a.id IN (SELECT pa.asset_id FROM product_assets pa WHERE pa.product_id = ?)");
     params.push(query.productId);
   }
 
@@ -651,21 +650,51 @@ export function listAssets(
           ? "f.size_bytes DESC, a.created_at DESC"
           : "a.created_at DESC";
 
-  const baseFrom = `
+  const needsFileFilter = Boolean(query.storageId) || query.minWidth !== undefined;
+  const needsFileForOrder = query.sort === "size_desc";
+  const needsVersionForFilter = Boolean(query.reviewStatus) || needsFileFilter;
+  const needsVersionForPage = needsVersionForFilter || needsFileForOrder;
+
+  const countFrom = `
     FROM assets a
-    JOIN asset_versions av ON av.id = a.current_version_id
-    JOIN files f ON f.id = av.file_id
-    JOIN storage_providers sp ON sp.id = f.storage_id
-    LEFT JOIN folders fld ON fld.id = a.folder_id
+    ${needsVersionForFilter ? "JOIN asset_versions av ON av.id = a.current_version_id" : ""}
+    ${needsFileFilter ? "JOIN files f ON f.id = av.file_id" : ""}
+    WHERE ${whereSql}
+  `;
+
+  const pageFrom = `
+    FROM assets a
+    ${needsVersionForPage ? "JOIN asset_versions av ON av.id = a.current_version_id" : ""}
+    ${needsFileFilter || needsFileForOrder ? "JOIN files f ON f.id = av.file_id" : ""}
     WHERE ${whereSql}
   `;
 
   const countRow = db.raw
-    .prepare(`SELECT COUNT(*) AS count ${baseFrom}`)
+    .prepare(`SELECT COUNT(*) AS count ${countFrom}`)
     .get(...params) as { count: number };
 
+  const total = Number(countRow.count ?? 0);
+  if (total === 0) {
+    return { items: [], total: 0, page: query.page, pageSize: query.pageSize };
+  }
+
   const offset = (query.page - 1) * query.pageSize;
-  const rows = db.raw
+  const pageIdRows = db.raw
+    .prepare(
+      `SELECT a.id
+       ${pageFrom}
+       ORDER BY ${orderSql}
+       LIMIT ? OFFSET ?`
+    )
+    .all(...params, query.pageSize, offset) as Array<{ id: string }>;
+
+  if (pageIdRows.length === 0) {
+    return { items: [], total, page: query.page, pageSize: query.pageSize };
+  }
+
+  const assetIds = pageIdRows.map((row) => row.id);
+  const idPlaceholders = assetIds.map(() => "?").join(", ");
+  const hydratedRows = db.raw
     .prepare(
       `SELECT
          a.id, a.name, a.original_filename, a.asset_type, a.purpose,
@@ -675,19 +704,26 @@ export function listAssets(
          f.storage_id, sp.status AS storage_status, f.sha256, f.size_bytes,
          f.mime_type, f.ext, f.width, f.height, f.duration_ms,
          a.created_at, a.updated_at
-       ${baseFrom}
-       ORDER BY ${orderSql}
-       LIMIT ? OFFSET ?`
+       FROM assets a
+       JOIN asset_versions av ON av.id = a.current_version_id
+       JOIN files f ON f.id = av.file_id
+       JOIN storage_providers sp ON sp.id = f.storage_id
+       LEFT JOIN folders fld ON fld.id = a.folder_id
+       WHERE a.id IN (${idPlaceholders})`
     )
-    .all(...params, query.pageSize, offset) as unknown as AssetJoinedRow[];
+    .all(...assetIds) as unknown as AssetJoinedRow[];
 
-  const assetIds = rows.map((row) => row.id);
+  const rowById = new Map(hydratedRows.map((row) => [row.id, row]));
+  const rows = assetIds
+    .map((id) => rowById.get(id))
+    .filter((row): row is AssetJoinedRow => Boolean(row));
+
   const tagsMap = loadTagsForAssets(db, assetIds);
   const productsMap = loadProductsForAssets(db, assetIds);
 
   return {
     items: rows.map((row) => mapAssetRow(row, tagsMap, productsMap)),
-    total: Number(countRow.count ?? 0),
+    total,
     page: query.page,
     pageSize: query.pageSize
   };

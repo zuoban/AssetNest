@@ -33,6 +33,7 @@ import {
   Images,
   Info,
   Layers,
+  PackageCheck,
   Plus,
   RefreshCw,
   RotateCcw,
@@ -58,6 +59,7 @@ import type {
   StoreRecord
 } from "../../shared/types";
 import { api } from "../api/client";
+import { ListingReleasePanel } from "../components/ListingReleasePanel";
 import {
   countCodePoints,
   formatAspectRatio,
@@ -67,7 +69,7 @@ import {
   REVIEW_STATUS_META
 } from "../utils/format";
 
-type WorkbenchTab = "assets" | "skus" | "pdp";
+type WorkbenchTab = "assets" | "skus" | "pdp" | "release";
 
 interface SortableCardProps {
   item: AssetSetItemRecord;
@@ -1062,6 +1064,18 @@ export function ListingWorkbenchPage() {
           <FileText className="h-4 w-4" />
           PDP 多语言文案 ({pdp?.versions.length ?? 0} 个历史版本)
         </button>
+        <button
+          type="button"
+          onClick={() => setActiveTab("release")}
+          className={`inline-flex items-center gap-1.5 border-b-2 px-3.5 py-2 text-sm font-medium ${
+            activeTab === "release"
+              ? "border-blue-600 text-blue-700"
+              : "border-transparent text-gray-600 hover:text-gray-900"
+          }`}
+        >
+          <PackageCheck className="h-4 w-4" />
+          检查与发布
+        </button>
       </div>
 
       {activeTab === "assets" && assetSets && (
@@ -1960,6 +1974,8 @@ export function ListingWorkbenchPage() {
           </div>
         </div>
       )}
+
+      {activeTab === "release" && <ListingReleasePanel listing={listing} />}
 
       {pickerOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/40 p-4">

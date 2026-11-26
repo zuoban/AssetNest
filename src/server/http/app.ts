@@ -20,6 +20,8 @@ import { registerJobRoutes } from "../modules/jobs/routes.js";
 import { JobWorker } from "../modules/jobs/worker.js";
 import { registerListingRoutes } from "../modules/listings/routes.js";
 import { registerProductRoutes } from "../modules/products/routes.js";
+import { executeReleaseExportJob } from "../modules/releases/exporter.js";
+import { registerReleaseRoutes } from "../modules/releases/routes.js";
 import {
   rebuildAssetSearchDocument,
   rebuildListingSearchDocument,
@@ -133,6 +135,9 @@ export async function createApp(options: CreateAppOptions): Promise<AppRuntime> 
   worker.registerHandler("backup", (payload, ctx) =>
     executeBackupJob(db, config, storageRegistry, APP_VERSION, payload, ctx)
   );
+  worker.registerHandler("export_zip", (payload, ctx) =>
+    executeReleaseExportJob(db, config, storageRegistry, payload, ctx)
+  );
   worker.registerHandler("thumbnail", async (payload) => {
     const assetId = String(payload.assetId ?? "");
     const versionId = String(payload.versionId ?? "");
@@ -213,11 +218,14 @@ export async function createApp(options: CreateAppOptions): Promise<AppRuntime> 
   registerSystemRoutes(app, db, config);
   registerJobRoutes(app, db, worker);
   registerStorageOpsRoutes(app, db, config, storageRegistry, worker);
-  registerBackupRoutes(app, db, config, worker);
+  registerBackupRoutes(app, db, config, storageRegistry, worker, (enabled) => {
+    maintenanceMode = enabled;
+  });
   registerProductRoutes(app, db);
   registerTaxonomyRoutes(app, db);
   registerAssetRoutes(app, db, config, storageRegistry);
   registerListingRoutes(app, db);
+  registerReleaseRoutes(app, db, config, storageRegistry, worker);
   registerTrashRoutes(app, db, worker);
 
   app.all("/api/*", async () => {

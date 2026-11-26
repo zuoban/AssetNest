@@ -6,6 +6,7 @@ export interface AppDatabase {
   readonly path: string;
   readonly raw: DatabaseSync;
   transaction<T>(fn: () => T): T;
+  replaceFileAndReopen(stagedDbPath: string): void;
   close(): void;
 }
 
@@ -68,33 +69,40 @@ export function openDatabase(options: OpenDatabaseOptions): AppDatabase {
     }
   }
 
-  const raw = new DatabaseSync(dbPath);
-  raw.exec("PRAGMA foreign_keys = ON;");
-  raw.exec("PRAGMA busy_timeout = 5000;");
-  raw.exec("PRAGMA synchronous = FULL;");
-  if (wal && dbPath !== ":memory:") {
-    raw.exec("PRAGMA journal_mode = WAL;");
+  function openConfiguredHandle(): DatabaseSync {
+    const handle = new DatabaseSync(dbPath);
+    handle.exec("PRAGMA foreign_keys = ON;");
+    handle.exec("PRAGMA busy_timeout = 5000;");
+    handle.exec("PRAGMA synchronous = FULL;");
+    if (wal && dbPath !== ":memory:") {
+      handle.exec("PRAGMA journal_mode = WAL;");
+    }
+    return handle;
   }
+
+  let currentRaw = openConfiguredHandle();
 
   let txDepth = 0;
   let closed = false;
 
   return {
     path: dbPath,
-    raw,
+    get raw(): DatabaseSync {
+      return currentRaw;
+    },
     transaction<T>(fn: () => T): T {
       if (txDepth === 0) {
-        raw.exec("BEGIN IMMEDIATE;");
+        currentRaw.exec("BEGIN IMMEDIATE;");
         txDepth = 1;
         try {
           const result = fn();
-          raw.exec("COMMIT;");
+          currentRaw.exec("COMMIT;");
           txDepth = 0;
           return result;
         } catch (err) {
           txDepth = 0;
           try {
-            raw.exec("ROLLBACK;");
+            currentRaw.exec("ROLLBACK;");
           } catch {
             // ignore secondary rollback error
           }
@@ -102,21 +110,99 @@ export function openDatabase(options: OpenDatabaseOptions): AppDatabase {
         }
       }
       const spName = `sp_${txDepth}`;
-      raw.exec(`SAVEPOINT ${spName};`);
+      currentRaw.exec(`SAVEPOINT ${spName};`);
       txDepth += 1;
       try {
         const result = fn();
-        raw.exec(`RELEASE SAVEPOINT ${spName};`);
+        currentRaw.exec(`RELEASE SAVEPOINT ${spName};`);
         txDepth -= 1;
         return result;
       } catch (err) {
         txDepth -= 1;
         try {
-          raw.exec(`ROLLBACK TO SAVEPOINT ${spName};`);
-          raw.exec(`RELEASE SAVEPOINT ${spName};`);
+          currentRaw.exec(`ROLLBACK TO SAVEPOINT ${spName};`);
+          currentRaw.exec(`RELEASE SAVEPOINT ${spName};`);
         } catch {
           // ignore
         }
+        throw err;
+      }
+    },
+    replaceFileAndReopen(stagedDbPath: string): void {
+      if (closed) {
+        throw new Error("数据库已关闭，无法执行原子替换");
+      }
+      if (dbPath === ":memory:") {
+        throw new Error("内存数据库不支持文件原子替换恢复");
+      }
+      if (txDepth > 0) {
+        throw new Error("当前存在未提交事务，禁止切换数据库文件");
+      }
+      if (!fs.existsSync(stagedDbPath)) {
+        throw new Error(`暂存数据库文件不存在: ${stagedDbPath}`);
+      }
+
+      const walPath = `${dbPath}-wal`;
+      const shmPath = `${dbPath}-shm`;
+      const backupBase = `${dbPath}.pre-restore`;
+      const backupWal = `${backupBase}-wal`;
+      const backupShm = `${backupBase}-shm`;
+
+      try {
+        if (wal) {
+          currentRaw.exec("PRAGMA wal_checkpoint(TRUNCATE);");
+        }
+      } catch {
+        // best-effort checkpoint before close
+      }
+      currentRaw.close();
+
+      fs.rmSync(backupBase, { force: true });
+      fs.rmSync(backupWal, { force: true });
+      fs.rmSync(backupShm, { force: true });
+
+      if (fs.existsSync(dbPath)) {
+        fs.renameSync(dbPath, backupBase);
+      }
+      if (fs.existsSync(walPath)) {
+        fs.renameSync(walPath, backupWal);
+      }
+      if (fs.existsSync(shmPath)) {
+        fs.renameSync(shmPath, backupShm);
+      }
+
+      try {
+        fs.copyFileSync(stagedDbPath, dbPath);
+        fs.rmSync(walPath, { force: true });
+        fs.rmSync(shmPath, { force: true });
+
+        const reopened = openConfiguredHandle();
+        const check = reopened.prepare("PRAGMA integrity_check;").get() as
+          | { integrity_check: string }
+          | undefined;
+        if (!check || check.integrity_check !== "ok") {
+          reopened.close();
+          throw new Error("替换后的数据库完整性检查失败");
+        }
+        currentRaw = reopened;
+
+        fs.rmSync(backupBase, { force: true });
+        fs.rmSync(backupWal, { force: true });
+        fs.rmSync(backupShm, { force: true });
+      } catch (err) {
+        fs.rmSync(dbPath, { force: true });
+        fs.rmSync(walPath, { force: true });
+        fs.rmSync(shmPath, { force: true });
+        if (fs.existsSync(backupBase)) {
+          fs.renameSync(backupBase, dbPath);
+        }
+        if (fs.existsSync(backupWal)) {
+          fs.renameSync(backupWal, walPath);
+        }
+        if (fs.existsSync(backupShm)) {
+          fs.renameSync(backupShm, shmPath);
+        }
+        currentRaw = openConfiguredHandle();
         throw err;
       }
     },
@@ -125,12 +211,12 @@ export function openDatabase(options: OpenDatabaseOptions): AppDatabase {
       closed = true;
       try {
         if (wal && dbPath !== ":memory:") {
-          raw.exec("PRAGMA wal_checkpoint(PASSIVE);");
+          currentRaw.exec("PRAGMA wal_checkpoint(PASSIVE);");
         }
       } catch {
         // best-effort checkpoint on shutdown
       } finally {
-        raw.close();
+        currentRaw.close();
         if (lockFd !== null) {
           try {
             fs.closeSync(lockFd);

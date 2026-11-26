@@ -264,6 +264,81 @@ function escapeFtsPhrase(term: string): string {
   return `"${term.replace(/"/g, '""')}"`;
 }
 
+export interface EntitySearchClause {
+  clause: string;
+  params: string[];
+  empty?: boolean;
+}
+
+export function buildEntitySearchClause(
+  db: AppDatabase,
+  entityType: SearchEntityType,
+  idExpr: string,
+  rawQuery: string
+): EntitySearchClause | null {
+  const tokens = rawQuery
+    .trim()
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter((token) => token.length > 0);
+
+  if (tokens.length === 0) {
+    return null;
+  }
+
+  const longTokens = tokens.filter((token) => Array.from(token).length >= 3);
+  const shortTokens = tokens.filter((token) => Array.from(token).length < 3);
+
+  if (longTokens.length > 0) {
+    const matchQuery = longTokens.map(escapeFtsPhrase).join(" AND ");
+    const hasFtsHit = db.raw
+      .prepare(
+        "SELECT 1 AS hit FROM search_fts WHERE entity_type = ? AND search_fts MATCH ? LIMIT 1"
+      )
+      .get(entityType, matchQuery) as { hit: number } | undefined;
+
+    if (hasFtsHit) {
+      if (shortTokens.length === 0) {
+        return {
+          clause: `${idExpr} IN (SELECT entity_id FROM search_fts WHERE entity_type = ? AND search_fts MATCH ?)`,
+          params: [entityType, matchQuery]
+        };
+      }
+
+      const shortClauses = shortTokens.map(() => "instr(lower(sd.search_text), lower(?)) > 0");
+      return {
+        clause: `${idExpr} IN (
+          SELECT fts.entity_id
+          FROM search_fts fts
+          JOIN search_documents sd ON sd.entity_type = ? AND sd.entity_id = fts.entity_id
+          WHERE fts.entity_type = ? AND fts.search_fts MATCH ? AND ${shortClauses.join(" AND ")}
+        )`,
+        params: [entityType, entityType, matchQuery, ...shortTokens]
+      };
+    }
+
+    // Rare fallback when FTS5 trigram returns no match for 3+ char tokens
+    const fallbackChecks = tokens.map(() => "instr(lower(sd.search_text), lower(?)) > 0");
+    return {
+      clause: `EXISTS (
+        SELECT 1 FROM search_documents sd
+        WHERE sd.entity_type = ? AND sd.entity_id = ${idExpr} AND ${fallbackChecks.join(" AND ")}
+      )`,
+      params: [entityType, ...tokens]
+    };
+  }
+
+  // 1-2 char short token search via search_documents PK lookup / scan
+  const shortChecks = shortTokens.map(() => "instr(lower(sd.search_text), lower(?)) > 0");
+  return {
+    clause: `EXISTS (
+      SELECT 1 FROM search_documents sd
+      WHERE sd.entity_type = ? AND sd.entity_id = ${idExpr} AND ${shortChecks.join(" AND ")}
+    )`,
+    params: [entityType, ...shortTokens]
+  };
+}
+
 export function searchEntityIds(
   db: AppDatabase,
   entityType: SearchEntityType,
@@ -316,4 +391,49 @@ export function searchEntityIds(
     .prepare(`SELECT entity_id FROM search_documents WHERE ${fallbackClauses.join(" AND ")}`)
     .all(...fallbackParams) as Array<{ entity_id: string }>;
   return fallbackRows.map((row) => row.entity_id);
+}
+
+export function rebuildAllSearchDocuments(db: AppDatabase): {
+  products: number;
+  assets: number;
+  listings: number;
+} {
+  return db.transaction(() => {
+    db.raw.prepare("DELETE FROM search_documents").run();
+    db.raw.prepare("DELETE FROM search_fts").run();
+
+    const productIds = db.raw
+      .prepare("SELECT id FROM products WHERE deleted_at IS NULL")
+      .all() as Array<{ id: string }>;
+    for (const row of productIds) {
+      rebuildProductSearchDocument(db, row.id);
+    }
+
+    const assetIds = db.raw
+      .prepare("SELECT id FROM assets WHERE deleted_at IS NULL")
+      .all() as Array<{ id: string }>;
+    for (const row of assetIds) {
+      rebuildAssetSearchDocument(db, row.id);
+    }
+
+    const listingsTableExists = db.raw
+      .prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'listings'")
+      .get() as { ok: number } | undefined;
+    let listingCount = 0;
+    if (listingsTableExists) {
+      const listingIds = db.raw
+        .prepare("SELECT id FROM listings WHERE deleted_at IS NULL")
+        .all() as Array<{ id: string }>;
+      for (const row of listingIds) {
+        rebuildListingSearchDocument(db, row.id);
+      }
+      listingCount = listingIds.length;
+    }
+
+    return {
+      products: productIds.length,
+      assets: assetIds.length,
+      listings: listingCount
+    };
+  });
 }
