@@ -4,10 +4,13 @@ import {
   Activity,
   Box,
   HardDrive,
+  Images,
   LayoutDashboard,
   LogOut,
   Menu,
+  Package,
   Settings,
+  Trash2,
   X
 } from "lucide-react";
 import type { AuthMeResponse } from "../../shared/types";
@@ -20,6 +23,9 @@ interface LayoutProps {
 
 const NAV_ITEMS = [
   { to: "/", label: "工作台", icon: LayoutDashboard, end: true },
+  { to: "/products", label: "商品中心", icon: Package, end: false },
+  { to: "/assets", label: "全部素材", icon: Images, end: false },
+  { to: "/trash", label: "回收站", icon: Trash2, end: false },
   { to: "/storage", label: "存储管理", icon: HardDrive, end: false },
   { to: "/jobs", label: "任务与审计", icon: Activity, end: false },
   { to: "/settings", label: "通用设置", icon: Settings, end: false }

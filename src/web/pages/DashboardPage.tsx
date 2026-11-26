@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
-import { AlertCircle, RefreshCw } from "lucide-react";
+import { Link } from "react-router-dom";
+import { AlertCircle, Images, Package, RefreshCw } from "lucide-react";
 import type { DashboardResponse } from "../../shared/types";
 import { api, ApiClientError } from "../api/client";
 import { JobStatusBadge, StorageStatusBadge } from "../components/StatusBadge";
@@ -10,7 +11,18 @@ const ACTION_LABELS: Record<string, string> = {
   "auth.login_failed": "登录验证失败",
   "auth.logout": "管理员退出登录",
   "auth.admin_reset_cli": "宿主机 CLI 重置管理员密码",
-  "settings.update": "更新系统通用设置"
+  "settings.update": "更新系统通用设置",
+  "product.create": "创建商品",
+  "product.update": "更新商品信息",
+  "product.soft_delete": "商品移入回收站",
+  "sku.create": "创建 SKU",
+  "sku.update": "更新 SKU",
+  "sku.delete": "删除 SKU",
+  "asset.upload": "上传素材",
+  "asset.update": "更新素材元数据",
+  "asset.batch": "批量处理素材",
+  "asset.regenerate_thumbnail": "重建素材缩略图",
+  "trash.restore": "从回收站恢复数据"
 };
 
 export function DashboardPage() {
@@ -37,12 +49,12 @@ export function DashboardPage() {
 
   const stats = data
     ? [
-        { label: "商品档案", value: data.counts.products, hint: "未软删除商品数" },
-        { label: "数字素材", value: data.counts.assets, hint: "未软删除素材数" },
-        { label: "待审核版本", value: data.counts.pendingReviews, hint: "按素材版本统计" },
-        { label: "上架草稿", value: data.counts.draftListings, hint: "草稿状态 Listing" },
-        { label: "执行中任务", value: data.counts.runningJobs, hint: "排队与运行中" },
-        { label: "失败任务", value: data.counts.failedJobs, hint: "需关注重试" }
+        { label: "商品档案", value: data.counts.products, hint: "未软删除商品数", to: "/products" },
+        { label: "数字素材", value: data.counts.assets, hint: "未软删除素材数", to: "/assets" },
+        { label: "待审核版本", value: data.counts.pendingReviews, hint: "按素材版本统计", to: "/assets" },
+        { label: "上架草稿", value: data.counts.draftListings, hint: "草稿状态 Listing", to: null },
+        { label: "执行中任务", value: data.counts.runningJobs, hint: "排队与运行中", to: "/jobs" },
+        { label: "失败任务", value: data.counts.failedJobs, hint: "需关注重试", to: "/jobs" }
       ]
     : [];
 
@@ -55,15 +67,31 @@ export function DashboardPage() {
             全部指标与活动流均实时统计自本地 SQLite 数据库
           </p>
         </div>
-        <button
-          type="button"
-          onClick={() => void load()}
-          disabled={loading}
-          className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-        >
-          <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
-          <span>刷新数据</span>
-        </button>
+        <div className="flex items-center gap-2">
+          <Link
+            to="/products"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+          >
+            <Package className="h-3.5 w-3.5" />
+            <span>商品中心</span>
+          </Link>
+          <Link
+            to="/assets"
+            className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700"
+          >
+            <Images className="h-3.5 w-3.5" />
+            <span>进入素材库</span>
+          </Link>
+          <button
+            type="button"
+            onClick={() => void load()}
+            disabled={loading}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+          >
+            <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
+            <span>刷新数据</span>
+          </button>
+        </div>
       </div>
 
       {error && (
@@ -74,18 +102,33 @@ export function DashboardPage() {
       )}
 
       <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
-        {stats.map((card) => (
-          <div
-            key={card.label}
-            className="rounded-xl border border-gray-200 bg-white p-4 transition-colors hover:border-gray-300"
-          >
-            <div className="text-xs font-medium text-gray-500">{card.label}</div>
-            <div className="font-mono-tabular mt-1.5 text-2xl font-semibold text-gray-900">
-              {card.value}
+        {stats.map((card) => {
+          const content = (
+            <>
+              <div className="text-xs font-medium text-gray-500">{card.label}</div>
+              <div className="font-mono-tabular mt-1.5 text-2xl font-semibold text-gray-900">
+                {card.value}
+              </div>
+              <div className="mt-1 text-[11px] text-gray-400">{card.hint}</div>
+            </>
+          );
+          return card.to ? (
+            <Link
+              key={card.label}
+              to={card.to}
+              className="rounded-xl border border-gray-200 bg-white p-4 transition-colors hover:border-blue-300"
+            >
+              {content}
+            </Link>
+          ) : (
+            <div
+              key={card.label}
+              className="rounded-xl border border-gray-200 bg-white p-4"
+            >
+              {content}
             </div>
-            <div className="mt-1 text-[11px] text-gray-400">{card.hint}</div>
-          </div>
-        ))}
+          );
+        })}
       </div>
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">

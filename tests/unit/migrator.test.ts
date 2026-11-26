@@ -32,8 +32,8 @@ describe("SQLite database & migrator", () => {
       expect(fk.foreign_keys).toBe(1);
 
       const first = runMigrations(db);
-      expect(first.length).toBeGreaterThanOrEqual(1);
-      expect(getCurrentSchemaVersion(db)).toBe(1);
+      expect(first.length).toBeGreaterThanOrEqual(2);
+      expect(getCurrentSchemaVersion(db)).toBe(first.length);
 
       const second = runMigrations(db);
       expect(second.length).toBe(0);

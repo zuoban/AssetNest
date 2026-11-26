@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import cookie from "@fastify/cookie";
+import multipart from "@fastify/multipart";
 import rateLimit from "@fastify/rate-limit";
 import fastifyStatic from "@fastify/static";
 import Fastify, { type FastifyInstance } from "fastify";
@@ -9,10 +10,15 @@ import { ensureRuntimeDirectories } from "../config/loader.js";
 import type { ResolvedAppConfig } from "../config/schema.js";
 import { openDatabase, type AppDatabase } from "../db/database.js";
 import { runMigrations } from "../db/migrator.js";
+import { registerAssetRoutes } from "../modules/assets/routes.js";
 import { registerAuthRoutes } from "../modules/auth/routes.js";
 import { isSystemInitialized } from "../modules/auth/service.js";
+import { registerProductRoutes } from "../modules/products/routes.js";
 import { registerSystemRoutes } from "../modules/system/routes.js";
 import { syncSystemBootstrapState } from "../modules/system/service.js";
+import { registerTaxonomyRoutes } from "../modules/taxonomy/routes.js";
+import { registerTrashRoutes } from "../modules/trash/routes.js";
+import { StorageRegistry } from "../storage/registry.js";
 import { AppError, registerErrorHandler } from "./errors.js";
 import { verifyCsrfHeaderAndOrigin } from "./security.js";
 
@@ -30,6 +36,7 @@ export interface AppRuntime {
   app: FastifyInstance;
   db: AppDatabase;
   config: ResolvedAppConfig;
+  storageRegistry: StorageRegistry;
   setMaintenanceMode(enabled: boolean): void;
   close(): Promise<void>;
 }
@@ -59,6 +66,7 @@ export async function createApp(options: CreateAppOptions): Promise<AppRuntime> 
     throw err;
   }
 
+  const storageRegistry = new StorageRegistry(config);
   let maintenanceMode = false;
 
   const app = Fastify({
@@ -81,6 +89,13 @@ export async function createApp(options: CreateAppOptions): Promise<AppRuntime> 
   });
 
   await app.register(cookie);
+  await app.register(multipart, {
+    limits: {
+      fileSize: config.uploads.maxFileSizeMB * 1024 * 1024,
+      files: 50,
+      fields: 50
+    }
+  });
   await app.register(rateLimit, {
     global: false
   });
@@ -128,6 +143,10 @@ export async function createApp(options: CreateAppOptions): Promise<AppRuntime> 
     loginRateLimitMax
   });
   registerSystemRoutes(app, db, config);
+  registerProductRoutes(app, db);
+  registerTaxonomyRoutes(app, db);
+  registerAssetRoutes(app, db, config, storageRegistry);
+  registerTrashRoutes(app, db);
 
   app.all("/api/*", async () => {
     throw new AppError(404, "NOT_FOUND", "请求的 API 接口不存在");
@@ -168,6 +187,7 @@ export async function createApp(options: CreateAppOptions): Promise<AppRuntime> 
     app,
     db,
     config,
+    storageRegistry,
     setMaintenanceMode(enabled: boolean) {
       maintenanceMode = enabled;
     },

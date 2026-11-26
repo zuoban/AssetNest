@@ -3,12 +3,16 @@ import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
 import type { AuthMeResponse, SetupStatusResponse } from "../shared/types";
 import { api, ApiClientError } from "./api/client";
 import { Layout } from "./components/Layout";
+import { AssetsPage } from "./pages/AssetsPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { JobsPage } from "./pages/JobsPage";
 import { LoginPage } from "./pages/LoginPage";
+import { ProductDetailPage } from "./pages/ProductDetailPage";
+import { ProductsPage } from "./pages/ProductsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { SetupPage } from "./pages/SetupPage";
 import { StoragePage } from "./pages/StoragePage";
+import { TrashPage } from "./pages/TrashPage";
 
 export function App() {
   const [loading, setLoading] = useState(true);
@@ -90,6 +94,10 @@ export function App() {
       <Layout auth={auth} onLogout={handleLogout}>
         <Routes>
           <Route path="/" element={<DashboardPage />} />
+          <Route path="/products" element={<ProductsPage />} />
+          <Route path="/products/:id" element={<ProductDetailPage />} />
+          <Route path="/assets" element={<AssetsPage />} />
+          <Route path="/trash" element={<TrashPage />} />
           <Route path="/storage" element={<StoragePage />} />
           <Route path="/jobs" element={<JobsPage />} />
           <Route
