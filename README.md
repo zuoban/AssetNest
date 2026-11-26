@@ -23,6 +23,16 @@ make
 ## 本地开发
 
 ```bash
+make dev
+```
+
+打开 [开发页面](http://127.0.0.1:5173)。Vite 默认只监听 `127.0.0.1:5173`，提供 React 热更新，并通过项目 `data/` 下为本次启动创建的独立 Unix socket 代理 `/api/v1` 和 `/healthz`。后端由 `tsx watch` 自动重启。按 `Ctrl+C` 停止，正常退出时会清理本次启动的 socket 和目录。
+
+需要同时运行隔离的开发实例时，可用 `ASSETNEST_DEV_WEB_PORT` 指定其他 Vite 端口，并用 `ASSETNEST_DATA_DIR` 指定独立数据目录。若配置文件中单独指定了数据库或存储路径，也要为隔离实例使用独立的配置文件。
+
+也可以分开启动后端和前端。`pnpm dev:server` 默认使用 TCP 3000 和 `./data`，`pnpm dev:web` 默认监听 `127.0.0.1:5173`，并将 `/api/v1` 和 `/healthz` 代理到 `127.0.0.1:3000`。
+
+```bash
 pnpm install
 pnpm typecheck
 pnpm build
@@ -30,11 +40,6 @@ pnpm test
 
 # 可选：运行 AC-15 性能压测（1,000 商品 / 5,000 SKU / 50,000 素材）
 pnpm tsx scripts/benchmark-m4.ts
-
-# 启动后端（默认端口 3000，数据目录 ./data）
-pnpm dev:server
-# 另开终端启动前端开发服务（端口 5173，代理 /api 到 3000）
-pnpm dev:web
 ```
 
 ## 单容器 Docker 部署

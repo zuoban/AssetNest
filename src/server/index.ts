@@ -3,13 +3,20 @@ import { createApp } from "./http/app.js";
 
 async function start(): Promise<void> {
   const config = loadConfig();
+  const socketPath = process.env.ASSETNEST_DEV_SOCKET;
+  const listenOptions = socketPath
+    ? { path: socketPath }
+    : { host: config.app.host, port: config.app.port };
   const runtime = await createApp({
     config,
     acquireInstanceLock: true,
     logger: true
   });
 
+  let shuttingDown = false;
   const shutdown = async (signal: string) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
     runtime.app.log.info({ signal }, "Shutting down AssetNest gracefully...");
     try {
       await runtime.close();
@@ -23,15 +30,16 @@ async function start(): Promise<void> {
   process.on("SIGINT", () => void shutdown("SIGINT"));
   process.on("SIGTERM", () => void shutdown("SIGTERM"));
 
-  await runtime.app.listen({
-    host: config.app.host,
-    port: config.app.port
-  });
+  try {
+    await runtime.app.listen(listenOptions);
+  } catch (err) {
+    await runtime.close();
+    throw err;
+  }
 
   runtime.app.log.info(
     {
-      host: config.app.host,
-      port: config.app.port,
+      ...listenOptions,
       configPath: config.configPath ?? "(default local)",
       dbPath: config.database.path
     },

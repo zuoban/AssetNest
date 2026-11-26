@@ -1,7 +1,13 @@
-import { defineConfig } from "vite";
+import { defineConfig, type ProxyOptions } from "vite";
 import react from "@vitejs/plugin-react";
 import tailwindcss from "@tailwindcss/vite";
 import path from "node:path";
+
+const socketPath = process.env.ASSETNEST_DEV_SOCKET;
+const backend: string | ProxyOptions = socketPath
+  // http-proxy reads socketPath from target. Keep the browser Host for CSRF checks.
+  ? { target: { protocol: "http:", socketPath } }
+  : "http://127.0.0.1:3000";
 
 export default defineConfig({
   root: path.resolve(import.meta.dirname, "src/web"),
@@ -11,10 +17,12 @@ export default defineConfig({
     emptyOutDir: true
   },
   server: {
+    host: "127.0.0.1",
     port: 5173,
+    strictPort: true,
     proxy: {
-      "/api": "http://127.0.0.1:3000",
-      "/healthz": "http://127.0.0.1:3000"
+      "^/api/v1(?:/|\\?|$)": backend,
+      "/healthz": backend
     }
   }
 });
