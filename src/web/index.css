@@ -1,0 +1,21 @@
+@import "tailwindcss";
+
+@layer base {
+  html {
+    font-family:
+      system-ui,
+      -apple-system,
+      "PingFang SC",
+      "Noto Sans SC",
+      "Noto Sans Thai",
+      "Microsoft YaHei",
+      sans-serif;
+    color: #111827;
+    background-color: #f8f9fa;
+  }
+
+  .font-mono-tabular {
+    font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    font-variant-numeric: tabular-nums;
+  }
+}

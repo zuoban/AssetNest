@@ -1,0 +1,56 @@
+# AssetNest 配置文件示例（挂载至容器 /config/config.yaml:ro）
+# 敏感密钥请始终通过 ${ENV_VAR} 引用，不要明文写入配置文件或数据库。
+
+app:
+  name: AssetNest
+  host: 0.0.0.0
+  port: 3000
+  locale: zh-CN
+  timezone: Asia/Shanghai
+  dataDir: /data
+
+database:
+  path: /data/db/assetnest.db
+  wal: true
+
+storage:
+  # 仅首次初始化时生效，之后默认存储由 SQLite settings 表管理
+  default: local
+  providers:
+    local:
+      name: 本地存储
+      type: local
+      enabled: true
+      root: /data/assets
+    # 按需取消注释并设置对应环境变量：
+    # r2:
+    #   name: Cloudflare R2
+    #   type: s3
+    #   enabled: false
+    #   endpoint: ${S3_ENDPOINT}
+    #   region: auto
+    #   bucket: assetnest
+    #   prefix: assets/
+    #   accessKeyId: ${S3_ACCESS_KEY}
+    #   secretAccessKey: ${S3_SECRET_KEY}
+    #   forcePathStyle: false
+    # nas:
+    #   name: NAS WebDAV
+    #   type: webdav
+    #   enabled: false
+    #   endpoint: ${WEBDAV_URL}
+    #   root: /assetnest
+    #   username: ${WEBDAV_USERNAME}
+    #   password: ${WEBDAV_PASSWORD}
+
+cache:
+  path: /data/cache
+  maxSizeMB: 2048
+
+uploads:
+  maxFileSizeMB: 1024
+  maxConcurrency: 4
+  tempDir: /data/imports
+
+worker:
+  concurrency: 2
