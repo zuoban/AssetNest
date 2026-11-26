@@ -55,6 +55,7 @@ import type {
   TrashResponse,
   UserProfile
 } from "../../shared/types";
+import { compressImageForUpload } from "../utils/imageCompression";
 
 export class ApiClientError extends Error {
   readonly status: number;
@@ -95,6 +96,33 @@ async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
   }
 
   return (await res.json()) as T;
+}
+
+export interface ImageUploadSizes {
+  originalBytes: number;
+  uploadedBytes: number;
+  unchangedImages: number;
+}
+
+async function appendUploadFiles(
+  form: FormData,
+  field: "files" | "file",
+  files: File[],
+  compressImages?: boolean
+): Promise<ImageUploadSizes | null> {
+  let sizes: ImageUploadSizes | null = null;
+  for (const original of files) {
+    const handleImage = compressImages && original.type.startsWith("image/");
+    const upload = handleImage ? await compressImageForUpload(original) : original;
+    form.append(field, upload, original.name);
+    if (handleImage) {
+      sizes ??= { originalBytes: 0, uploadedBytes: 0, unchangedImages: 0 };
+      sizes.originalBytes += original.size;
+      sizes.uploadedBytes += upload.size;
+      if (upload.size === original.size) sizes.unchangedImages++;
+    }
+  }
+  return sizes;
 }
 
 export const api = {
@@ -364,9 +392,10 @@ export const api = {
       body: JSON.stringify(payload)
     });
   },
-  uploadAssets(
+  async uploadAssets(
     files: File[],
     options: {
+      compressImages?: boolean;
       productId?: string;
       folderId?: string | null;
       storageId?: string;
@@ -376,7 +405,7 @@ export const api = {
       notes?: string;
       promptText?: string;
     } = {}
-  ): Promise<{ items: AssetDetail[]; uploadedCount: number; deduplicatedCount: number }> {
+  ) {
     const form = new FormData();
     if (options.productId) form.append("productId", options.productId);
     if (options.folderId) form.append("folderId", options.folderId);
@@ -388,25 +417,24 @@ export const api = {
     if (options.source) form.append("source", options.source);
     if (options.notes) form.append("notes", options.notes);
     if (options.promptText) form.append("promptText", options.promptText);
-    for (const file of files) {
-      form.append("files", file, file.name);
-    }
-    return requestJson("/api/v1/assets/upload", {
-      method: "POST",
-      body: form
-    });
+    const compression = await appendUploadFiles(form, "files", files, options.compressImages);
+    const result = await requestJson<{ items: AssetDetail[]; uploadedCount: number; deduplicatedCount: number }>(
+      "/api/v1/assets/upload", { method: "POST", body: form }
+    );
+    return { ...result, compression };
   },
-  appendAssetVersion(
+  async appendAssetVersion(
     assetId: string,
     file: File,
     options: {
+      compressImages?: boolean;
       storageId?: string;
       changeNote?: string;
       promptText?: string;
       referenceAssetVersionId?: string;
       setAsCurrent?: boolean;
     } = {}
-  ): Promise<{ asset: AssetDetail; version: AssetVersionRecord; deduplicated: boolean }> {
+  ) {
     const form = new FormData();
     if (options.storageId) form.append("storageId", options.storageId);
     if (options.changeNote) form.append("changeNote", options.changeNote);
@@ -417,11 +445,11 @@ export const api = {
     if (options.setAsCurrent !== undefined) {
       form.append("setAsCurrent", options.setAsCurrent ? "true" : "false");
     }
-    form.append("file", file, file.name);
-    return requestJson(`/api/v1/assets/${encodeURIComponent(assetId)}/versions`, {
-      method: "POST",
-      body: form
-    });
+    const compression = await appendUploadFiles(form, "file", [file], options.compressImages);
+    const result = await requestJson<{ asset: AssetDetail; version: AssetVersionRecord; deduplicated: boolean }>(
+      `/api/v1/assets/${encodeURIComponent(assetId)}/versions`, { method: "POST", body: form }
+    );
+    return { ...result, compression };
   },
   switchAssetCurrentVersion(assetId: string, versionId: string): Promise<AssetDetail> {
     return requestJson(`/api/v1/assets/${encodeURIComponent(assetId)}/current-version`, {

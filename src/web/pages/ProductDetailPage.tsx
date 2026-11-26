@@ -37,10 +37,12 @@ import { api, ApiClientError } from "../api/client";
 import { AssetLightbox } from "../components/AssetLightbox";
 import { ConfirmDialog, type ConfirmDialogState } from "../components/ConfirmDialog";
 import { FileDropButton } from "../components/FileDropButton";
+import { ImageCompressionSwitch } from "../components/ImageCompressionSwitch";
 import {
   formatAspectRatio,
   formatBytes,
   formatDateTime,
+  formatUploadCompression,
   LISTING_STATUS_META,
   MASTER_ANGLE_OPTIONS,
   PRODUCT_STATUS_META,
@@ -105,6 +107,7 @@ export function ProductDetailPage() {
 
   // Asset upload & lightbox
   const [uploading, setUploading] = useState(false);
+  const [compressUploadImages, setCompressUploadImages] = useState(true);
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
 
   // Master image lock / unlock modals
@@ -387,11 +390,11 @@ export function ProductDetailPage() {
     setError(null);
     setNotice(null);
     try {
-      const res = await api.uploadAssets(files, { productId: id });
+      const res = await api.uploadAssets(files, { productId: id, compressImages: compressUploadImages });
       setNotice(
         `已上传 ${res.uploadedCount} 个素材${
           res.deduplicatedCount > 0 ? `（其中 ${res.deduplicatedCount} 个复用已有底层文件）` : ""
-        }`
+        }${formatUploadCompression(res.compression)}`
       );
       await loadAll();
     } catch (err) {
@@ -1089,15 +1092,22 @@ export function ProductDetailPage() {
             </div>
           </div>
 
-          <FileDropButton
-            multiple
-            disabled={uploading}
-            onFiles={(files) => void handleUploadLinkedAssets(files)}
-            className="flex flex-col items-center justify-center gap-1.5 px-4 py-5 text-sm font-medium"
-          >
-            <Upload className="h-5 w-5 text-blue-600" />
-            <span>{uploading ? "正在上传素材…" : "拖入文件或点击选择，上传到此商品"}</span>
-          </FileDropButton>
+          <div className="space-y-2">
+            <ImageCompressionSwitch
+              checked={compressUploadImages}
+              onChange={setCompressUploadImages}
+              disabled={uploading}
+            />
+            <FileDropButton
+              multiple
+              disabled={uploading}
+              onFiles={(files) => void handleUploadLinkedAssets(files)}
+              className="flex flex-col items-center justify-center gap-1.5 px-4 py-5 text-sm font-medium"
+            >
+              <Upload className="h-5 w-5 text-blue-600" />
+              <span>{uploading ? "正在上传素材…" : "拖入文件或点击选择，上传到此商品"}</span>
+            </FileDropButton>
+          </div>
 
           {/* Locked Master Images Panel */}
           <section className="rounded-xl border border-gray-200 bg-white p-4">

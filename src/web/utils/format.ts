@@ -4,6 +4,7 @@ import type {
   ReviewStatus,
   TagDimension
 } from "../../shared/types";
+import type { ImageUploadSizes } from "../api/client";
 
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return "0 B";
@@ -16,6 +17,23 @@ export function formatBytes(bytes: number): string {
     idx += 1;
   }
   return `${value.toFixed(value >= 100 ? 0 : 1)} ${units[idx]}`;
+}
+
+export function formatUploadCompression(sizes: ImageUploadSizes | null): string {
+  if (!sizes) return "";
+  const { originalBytes, uploadedBytes, unchangedImages } = sizes;
+  const original = formatBytes(originalBytes);
+  if (originalBytes === uploadedBytes) return ` · 图片未缩小，按原文件上传（${original}）`;
+
+  const uploaded = formatBytes(uploadedBytes);
+  const saving = ((originalBytes - uploadedBytes) / originalBytes) * 100;
+  const percent = saving < 0.1 ? "<0.1%" : `${saving.toFixed(1)}%`;
+  const sizeChange = original === uploaded
+    ? `原始 ${originalBytes} B → 上传 ${uploadedBytes} B`
+    : `原始 ${original} → 上传 ${uploaded}`;
+  return ` · 图片${sizeChange}，节省 ${percent}${
+    unchangedImages > 0 ? `（${unchangedImages} 张未缩小）` : ""
+  }`;
 }
 
 export function formatDateTime(iso: string | null | undefined): string {

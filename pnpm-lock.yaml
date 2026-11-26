@@ -44,6 +44,9 @@ importers:
       sharp:
         specifier: ^0.35.5
         version: 0.35.5(@types/node@22.20.7)
+      wasm-imagequant:
+        specifier: 0.1.4
+        version: 0.1.4
       yaml:
         specifier: ^2.7.1
         version: 2.9.1
@@ -1913,6 +1916,9 @@ packages:
       jsdom:
         optional: true
 
+  wasm-imagequant@0.1.4:
+    resolution: {integrity: sha512-NCKeyvwRBnEuoRXJG2FiyBwVMxY1W9SA590Xo0DdvAt1UNyKSMrPZGG/su68wqbd34r9JxfHtWHifk+wdM2RQQ==}
+
   which@2.0.2:
     resolution: {integrity: sha512-BLI3Tl1TW3Pvl70l3yq3Y64i+awpwXqsGBYWkkqMtnbXgrMD+yj7rhW0kuEDxzJaYXGjEW5ogapKNMEKNMjibA==}
     engines: {node: '>= 8'}
@@ -3622,6 +3628,8 @@ snapshots:
       - terser
       - tsx
       - yaml
+
+  wasm-imagequant@0.1.4: {}
 
   which@2.0.2:
     dependencies:

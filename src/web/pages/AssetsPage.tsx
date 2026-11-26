@@ -47,11 +47,13 @@ import { api, ApiClientError } from "../api/client";
 import { AssetLightbox } from "../components/AssetLightbox";
 import { ConfirmDialog, type ConfirmDialogState } from "../components/ConfirmDialog";
 import { FileDropButton, useFileDrop } from "../components/FileDropButton";
+import { ImageCompressionSwitch } from "../components/ImageCompressionSwitch";
 import { StorageStatusBadge } from "../components/StatusBadge";
 import {
   ASSET_PURPOSES,
   formatBytes,
   formatDateTime,
+  formatUploadCompression,
   REVIEW_STATUS_META,
   TAG_DIMENSION_LABELS
 } from "../utils/format";
@@ -142,6 +144,7 @@ export function AssetsPage() {
   const [versionChangeNote, setVersionChangeNote] = useState("");
   const [versionPromptText, setVersionPromptText] = useState("");
   const [versionSetCurrent, setVersionSetCurrent] = useState(true);
+  const [compressVersionImage, setCompressVersionImage] = useState(true);
   const [versionUploading, setVersionUploading] = useState(false);
   const [versionActionBusyId, setVersionActionBusyId] = useState<string | null>(null);
   const [reviewingVersionId, setReviewingVersionId] = useState<string | null>(null);
@@ -150,6 +153,7 @@ export function AssetsPage() {
   // Upload state
   const [uploadModalError, setUploadModalError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
+  const [compressUploadImages, setCompressUploadImages] = useState(true);
   const [exportingStandard, setExportingStandard] = useState(false);
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
   const [uploadTargetProductId, setUploadTargetProductId] = useState("");
@@ -425,6 +429,7 @@ export function AssetsPage() {
     setNotice(null);
     try {
       const res = await api.uploadAssets(files, {
+        compressImages: compressUploadImages,
         productId: opts.productId || undefined,
         folderId: opts.folderId || undefined,
         purpose: opts.purpose || undefined,
@@ -433,7 +438,7 @@ export function AssetsPage() {
       setNotice(
         `成功上传 ${res.uploadedCount} 个素材${
           res.deduplicatedCount > 0 ? `（${res.deduplicatedCount} 个命中内容去重）` : ""
-        }`
+        }${formatUploadCompression(res.compression)}`
       );
       setUploadModalOpen(false);
       setUploadPendingFiles([]);
@@ -559,6 +564,7 @@ export function AssetsPage() {
     setNotice(null);
     try {
       const res = await api.appendAssetVersion(activeAsset.id, versionFile, {
+        compressImages: compressVersionImage,
         changeNote: versionChangeNote.trim() || undefined,
         promptText: versionPromptText.trim() || undefined,
         setAsCurrent: versionSetCurrent
@@ -572,7 +578,7 @@ export function AssetsPage() {
       setNotice(
         `已追加新版本 V${res.version.versionNo}（旧版本完整保留${
           res.deduplicated ? "，复用已有底层文件" : ""
-        }）`
+        }）${formatUploadCompression(res.compression)}`
       );
       await loadAssets();
     } catch (err) {
@@ -761,7 +767,12 @@ export function AssetsPage() {
             <span className="font-mono-tabular font-medium text-gray-700">{total}</span> 项）
           </p>
         </div>
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          <ImageCompressionSwitch
+            checked={compressUploadImages}
+            onChange={setCompressUploadImages}
+            disabled={uploading}
+          />
           <button
             type="button"
             onClick={() => {
@@ -1740,6 +1751,11 @@ export function AssetsPage() {
                     <p className="text-gray-600">
                       追加为 V{activeAsset.versions.length + 1}，不覆盖旧版本与已锁定的商品母图。
                     </p>
+                    <ImageCompressionSwitch
+                      checked={compressVersionImage}
+                      onChange={setCompressVersionImage}
+                      disabled={versionUploading}
+                    />
                     <FileDropButton
                       disabled={versionUploading}
                       onFiles={(files) => {
@@ -2177,7 +2193,12 @@ export function AssetsPage() {
                 </div>
               </div>
 
-              <div>
+              <div className="space-y-2">
+                <ImageCompressionSwitch
+                  checked={compressUploadImages}
+                  onChange={setCompressUploadImages}
+                  disabled={uploading}
+                />
                 <FileDropButton
                   multiple
                   disabled={uploading}
@@ -2202,11 +2223,11 @@ export function AssetsPage() {
                     {uploadPendingFiles.map((file, idx) => (
                       <div
                         key={`${file.name}-${idx}`}
-                        className="flex items-center justify-between text-[11px]"
+                        className="flex items-center justify-between gap-2 text-[11px]"
                       >
                         <span className="truncate text-gray-800">{file.name}</span>
-                        <span className="font-mono-tabular shrink-0 text-gray-400">
-                          {formatBytes(file.size)}
+                        <span className="font-mono-tabular shrink-0 text-gray-500">
+                          原始大小 {formatBytes(file.size)}
                         </span>
                       </div>
                     ))}
