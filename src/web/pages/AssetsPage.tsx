@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type DragEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
@@ -46,6 +46,7 @@ import type {
 import { api, ApiClientError } from "../api/client";
 import { AssetLightbox } from "../components/AssetLightbox";
 import { ConfirmDialog, type ConfirmDialogState } from "../components/ConfirmDialog";
+import { FileDropButton, useFileDrop } from "../components/FileDropButton";
 import { StorageStatusBadge } from "../components/StatusBadge";
 import {
   ASSET_PURPOSES,
@@ -68,8 +69,8 @@ const DIMENSION_ORDER: TagDimension[] = [
 
 export function AssetsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const uploadInputRef = useRef<HTMLInputElement>(null);
-  const versionFileInputRef = useRef<HTMLInputElement>(null);
+  const uploadInFlight = useRef(false);
+  const versionUploadInFlight = useRef(false);
   const scrollParentRef = useRef<HTMLDivElement>(null);
 
   // Taxonomy & reference lists
@@ -137,6 +138,7 @@ export function AssetsPage() {
   // Version upload & independent per-version review
   const [versionFormOpen, setVersionFormOpen] = useState(false);
   const [versionFile, setVersionFile] = useState<File | null>(null);
+  const [versionFileError, setVersionFileError] = useState<string | null>(null);
   const [versionChangeNote, setVersionChangeNote] = useState("");
   const [versionPromptText, setVersionPromptText] = useState("");
   const [versionSetCurrent, setVersionSetCurrent] = useState(true);
@@ -146,7 +148,7 @@ export function AssetsPage() {
   const [versionReviewNote, setVersionReviewNote] = useState("");
 
   // Upload state
-  const [draggingOver, setDraggingOver] = useState(false);
+  const [uploadModalError, setUploadModalError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [exportingStandard, setExportingStandard] = useState(false);
   const [uploadModalOpen, setUploadModalOpen] = useState(false);
@@ -296,6 +298,7 @@ export function AssetsPage() {
     }
     setVersionFormOpen(false);
     setVersionFile(null);
+    setVersionFileError(null);
     setVersionChangeNote("");
     setVersionPromptText("");
     setVersionSetCurrent(true);
@@ -414,8 +417,10 @@ export function AssetsPage() {
     files: File[],
     opts: { productId?: string; folderId?: string; purpose?: string; storageId?: string }
   ) => {
-    if (files.length === 0) return;
+    if (files.length === 0 || uploadInFlight.current) return;
+    uploadInFlight.current = true;
     setUploading(true);
+    setUploadModalError(null);
     setError(null);
     setNotice(null);
     try {
@@ -437,24 +442,22 @@ export function AssetsPage() {
         setActiveAssetId(res.items[0].id);
       }
     } catch (err) {
-      setError(err instanceof ApiClientError ? err.message : "上传失败");
+      const message = err instanceof ApiClientError ? err.message : "上传失败";
+      if (uploadModalOpen) setUploadModalError(message);
+      else setError(message);
     } finally {
+      uploadInFlight.current = false;
       setUploading(false);
-      if (uploadInputRef.current) uploadInputRef.current.value = "";
     }
   };
 
-  const handleDrop = (event: DragEvent<HTMLDivElement>) => {
-    event.preventDefault();
-    setDraggingOver(false);
-    const files = Array.from(event.dataTransfer.files || []);
-    if (files.length === 0) return;
+  const { draggingOver, dropProps: workspaceDropProps } = useFileDrop((files) => {
     void performUpload(files, {
       productId: productId || undefined,
       folderId: folderId || undefined,
       storageId: storageId || undefined
     });
-  };
+  }, uploading || uploadModalOpen);
 
   const handleCreateFolder = async () => {
     if (!newFolderName.trim()) return;
@@ -549,7 +552,8 @@ export function AssetsPage() {
   };
 
   const handleAppendVersion = async () => {
-    if (!activeAsset || !versionFile) return;
+    if (!activeAsset || !versionFile || versionFileError || versionUploadInFlight.current) return;
+    versionUploadInFlight.current = true;
     setVersionUploading(true);
     setError(null);
     setNotice(null);
@@ -565,7 +569,6 @@ export function AssetsPage() {
       setVersionChangeNote("");
       setVersionPromptText("");
       setVersionFormOpen(false);
-      if (versionFileInputRef.current) versionFileInputRef.current.value = "";
       setNotice(
         `已追加新版本 V${res.version.versionNo}（旧版本完整保留${
           res.deduplicated ? "，复用已有底层文件" : ""
@@ -575,6 +578,7 @@ export function AssetsPage() {
     } catch (err) {
       setError(err instanceof ApiClientError ? err.message : "上传新版本失败");
     } finally {
+      versionUploadInFlight.current = false;
       setVersionUploading(false);
     }
   };
@@ -787,11 +791,13 @@ export function AssetsPage() {
           </button>
           <button
             type="button"
+            disabled={uploading}
             onClick={() => {
               setUploadTargetProductId(productId);
               setUploadTargetFolderId(folderId);
               setUploadTargetStorageId(storageId);
               setUploadPendingFiles([]);
+              setUploadModalError(null);
               setUploadModalOpen(true);
             }}
             className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-blue-700"
@@ -1067,14 +1073,7 @@ export function AssetsPage() {
         {/* Center Workspace */}
         <div
           className="relative flex min-w-0 flex-1 flex-col"
-          onDragOver={(e) => {
-            e.preventDefault();
-            setDraggingOver(true);
-          }}
-          onDragLeave={(e) => {
-            if (e.currentTarget === e.target) setDraggingOver(false);
-          }}
-          onDrop={handleDrop}
+          {...workspaceDropProps}
         >
           {draggingOver && (
             <div className="pointer-events-none absolute inset-0 z-30 flex flex-col items-center justify-center border-2 border-dashed border-blue-500 bg-blue-50/85 backdrop-blur-[1px]">
@@ -1727,6 +1726,7 @@ export function AssetsPage() {
                   </span>
                   <button
                     type="button"
+                    disabled={versionUploading}
                     onClick={() => setVersionFormOpen((prev) => !prev)}
                     className="inline-flex items-center gap-1 rounded border border-blue-200 bg-blue-50 px-2 py-0.5 text-[11px] font-medium text-blue-700 hover:bg-blue-100"
                   >
@@ -1740,14 +1740,31 @@ export function AssetsPage() {
                     <p className="text-gray-600">
                       追加为 V{activeAsset.versions.length + 1}，不覆盖旧版本与已锁定的商品母图。
                     </p>
-                    <input
-                      ref={versionFileInputRef}
-                      type="file"
-                      onChange={(e) => setVersionFile(e.target.files?.[0] ?? null)}
-                      className="block w-full text-[11px] text-gray-700 file:mr-2 file:rounded file:border-0 file:bg-white file:px-2 file:py-1 file:text-[11px] file:font-medium file:text-blue-700"
-                    />
+                    <FileDropButton
+                      disabled={versionUploading}
+                      onFiles={(files) => {
+                        if (versionUploadInFlight.current) return;
+                        if (files.length > 1) {
+                          setVersionFileError("每次只能上传一个版本文件，请重新选择或拖入单个文件。");
+                          return;
+                        }
+                        setVersionFile(files[0] ?? null);
+                        setVersionFileError(null);
+                      }}
+                      className="flex items-center justify-center gap-1.5 px-2 py-2 font-medium"
+                    >
+                      <Upload className="h-3.5 w-3.5" />
+                      <span>拖入单个文件，或点击选择</span>
+                    </FileDropButton>
+                    {versionFile && (
+                      <p className="break-all text-gray-700">已选择：{versionFile.name}</p>
+                    )}
+                    {versionFileError && (
+                      <p role="alert" className="text-rose-700">{versionFileError}</p>
+                    )}
                     <input
                       type="text"
+                      disabled={versionUploading}
                       value={versionChangeNote}
                       onChange={(e) => setVersionChangeNote(e.target.value)}
                       placeholder="变更说明（如：调整高光、修复文字）"
@@ -1755,6 +1772,7 @@ export function AssetsPage() {
                     />
                     <textarea
                       rows={2}
+                      disabled={versionUploading}
                       value={versionPromptText}
                       onChange={(e) => setVersionPromptText(e.target.value)}
                       placeholder="提示词 / 生成参数（可选）"
@@ -1763,6 +1781,7 @@ export function AssetsPage() {
                     <label className="flex cursor-pointer items-center gap-1.5 text-gray-700">
                       <input
                         type="checkbox"
+                        disabled={versionUploading}
                         checked={versionSetCurrent}
                         onChange={(e) => setVersionSetCurrent(e.target.checked)}
                         className="rounded border-gray-300"
@@ -1771,7 +1790,7 @@ export function AssetsPage() {
                     </label>
                     <button
                       type="button"
-                      disabled={!versionFile || versionUploading}
+                      disabled={!versionFile || !!versionFileError || versionUploading}
                       onClick={() => void handleAppendVersion()}
                       className="w-full rounded-lg bg-blue-600 px-2.5 py-1.5 font-medium text-white hover:bg-blue-700 disabled:opacity-50"
                     >
@@ -2081,6 +2100,7 @@ export function AssetsPage() {
               <h2 className="text-sm font-semibold text-gray-900">批量上传素材</h2>
               <button
                 type="button"
+                disabled={uploading}
                 onClick={() => setUploadModalOpen(false)}
                 className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
               >
@@ -2093,6 +2113,7 @@ export function AssetsPage() {
                 <div>
                   <label className="mb-1 block font-medium text-gray-700">关联商品（选填）</label>
                   <select
+                    disabled={uploading}
                     value={uploadTargetProductId}
                     onChange={(e) => setUploadTargetProductId(e.target.value)}
                     className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-2 focus:border-blue-500 focus:outline-none"
@@ -2108,6 +2129,7 @@ export function AssetsPage() {
                 <div>
                   <label className="mb-1 block font-medium text-gray-700">目标文件夹</label>
                   <select
+                    disabled={uploading}
                     value={uploadTargetFolderId}
                     onChange={(e) => setUploadTargetFolderId(e.target.value)}
                     className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-2 focus:border-blue-500 focus:outline-none"
@@ -2123,6 +2145,7 @@ export function AssetsPage() {
                 <div>
                   <label className="mb-1 block font-medium text-gray-700">默认用途</label>
                   <select
+                    disabled={uploading}
                     value={uploadTargetPurpose}
                     onChange={(e) => setUploadTargetPurpose(e.target.value)}
                     className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-2 focus:border-blue-500 focus:outline-none"
@@ -2137,6 +2160,7 @@ export function AssetsPage() {
                 <div>
                   <label className="mb-1 block font-medium text-gray-700">目标存储空间</label>
                   <select
+                    disabled={uploading}
                     value={uploadTargetStorageId}
                     onChange={(e) => setUploadTargetStorageId(e.target.value)}
                     className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-2 focus:border-blue-500 focus:outline-none"
@@ -2154,27 +2178,25 @@ export function AssetsPage() {
               </div>
 
               <div>
-                <input
-                  ref={uploadInputRef}
-                  type="file"
+                <FileDropButton
                   multiple
-                  className="hidden"
-                  onChange={(e) => {
-                    const picked = Array.from(e.target.files || []);
-                    setUploadPendingFiles(picked);
+                  disabled={uploading}
+                  onFiles={(files) => {
+                    if (uploadInFlight.current) return;
+                    setUploadPendingFiles(files);
+                    setUploadModalError(null);
                   }}
-                />
-                <button
-                  type="button"
-                  onClick={() => uploadInputRef.current?.click()}
-                  className="flex w-full flex-col items-center justify-center rounded-xl border border-dashed border-gray-300 bg-gray-50 px-4 py-6 text-gray-500 hover:border-blue-400 hover:bg-blue-50/40"
+                  className="flex flex-col items-center justify-center px-4 py-6"
                 >
                   <Upload className="h-6 w-6 text-gray-400" />
-                  <span className="mt-1.5 font-medium text-gray-700">点击选择要上传的文件</span>
+                  <span className="mt-1.5 font-medium text-gray-700">拖入文件，或点击选择</span>
                   <span className="mt-0.5 text-[11px] text-gray-400">
                     支持多文件批量上传，相同底层文件自动基于 SHA-256 去重
                   </span>
-                </button>
+                </FileDropButton>
+                {uploadModalError && (
+                  <p role="alert" className="mt-2 text-rose-700">{uploadModalError}</p>
+                )}
                 {uploadPendingFiles.length > 0 && (
                   <div className="mt-2 max-h-32 space-y-1 overflow-y-auto rounded-lg border border-gray-200 p-2">
                     {uploadPendingFiles.map((file, idx) => (
@@ -2195,6 +2217,7 @@ export function AssetsPage() {
               <div className="flex justify-end gap-2 border-t border-gray-100 pt-3">
                 <button
                   type="button"
+                  disabled={uploading}
                   onClick={() => setUploadModalOpen(false)}
                   className="rounded-lg border border-gray-200 px-3.5 py-2 font-medium text-gray-700 hover:bg-gray-50"
                 >

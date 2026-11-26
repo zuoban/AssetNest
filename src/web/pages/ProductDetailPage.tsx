@@ -36,6 +36,7 @@ import type {
 import { api, ApiClientError } from "../api/client";
 import { AssetLightbox } from "../components/AssetLightbox";
 import { ConfirmDialog, type ConfirmDialogState } from "../components/ConfirmDialog";
+import { FileDropButton } from "../components/FileDropButton";
 import {
   formatAspectRatio,
   formatBytes,
@@ -60,7 +61,7 @@ interface AttrRow {
 export function ProductDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const uploadInputRef = useRef<HTMLInputElement>(null);
+  const uploadInFlight = useRef(false);
 
   const [product, setProduct] = useState<ProductDetail | null>(null);
   const [assets, setAssets] = useState<AssetListItem[]>([]);
@@ -379,13 +380,14 @@ export function ProductDetailPage() {
     });
   };
 
-  const handleUploadLinkedAssets = async (files: FileList | null) => {
-    if (!id || !files || files.length === 0) return;
+  const handleUploadLinkedAssets = async (files: File[]) => {
+    if (!id || files.length === 0 || uploadInFlight.current) return;
+    uploadInFlight.current = true;
     setUploading(true);
     setError(null);
     setNotice(null);
     try {
-      const res = await api.uploadAssets(Array.from(files), { productId: id });
+      const res = await api.uploadAssets(files, { productId: id });
       setNotice(
         `已上传 ${res.uploadedCount} 个素材${
           res.deduplicatedCount > 0 ? `（其中 ${res.deduplicatedCount} 个复用已有底层文件）` : ""
@@ -395,8 +397,8 @@ export function ProductDetailPage() {
     } catch (err) {
       setError(err instanceof ApiClientError ? err.message : "上传素材失败");
     } finally {
+      uploadInFlight.current = false;
       setUploading(false);
-      if (uploadInputRef.current) uploadInputRef.current.value = "";
     }
   };
 
@@ -1084,24 +1086,18 @@ export function ProductDetailPage() {
                 <Columns className="h-3.5 w-3.5" />
                 <span>{compareOpen ? "收起并排对比审核" : "母图并排对比审核"}</span>
               </button>
-              <input
-                ref={uploadInputRef}
-                type="file"
-                multiple
-                className="hidden"
-                onChange={(e) => void handleUploadLinkedAssets(e.target.files)}
-              />
-              <button
-                type="button"
-                disabled={uploading}
-                onClick={() => uploadInputRef.current?.click()}
-                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-              >
-                <Upload className="h-3.5 w-3.5" />
-                <span>{uploading ? "上传中..." : "上传素材到此商品"}</span>
-              </button>
             </div>
           </div>
+
+          <FileDropButton
+            multiple
+            disabled={uploading}
+            onFiles={(files) => void handleUploadLinkedAssets(files)}
+            className="flex flex-col items-center justify-center gap-1.5 px-4 py-5 text-sm font-medium"
+          >
+            <Upload className="h-5 w-5 text-blue-600" />
+            <span>{uploading ? "正在上传素材…" : "拖入文件或点击选择，上传到此商品"}</span>
+          </FileDropButton>
 
           {/* Locked Master Images Panel */}
           <section className="rounded-xl border border-gray-200 bg-white p-4">
