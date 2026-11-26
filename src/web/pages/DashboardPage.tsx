@@ -1,41 +1,11 @@
 import { useCallback, useEffect, useState } from "react";
 import { Link } from "react-router-dom";
-import { AlertCircle, Images, Package, RefreshCw } from "lucide-react";
+import { AlertCircle, ArrowUpRight, Images, Layers, Package, RefreshCw } from "lucide-react";
 import type { DashboardResponse } from "../../shared/types";
 import { api, ApiClientError } from "../api/client";
 import { JobStatusBadge, StorageStatusBadge } from "../components/StatusBadge";
-
-const ACTION_LABELS: Record<string, string> = {
-  "setup.init": "完成系统首次初始化",
-  "auth.login": "管理员登录",
-  "auth.login_failed": "登录验证失败",
-  "auth.logout": "管理员退出登录",
-  "auth.admin_reset_cli": "宿主机 CLI 重置管理员密码",
-  "settings.update": "更新系统通用设置",
-  "product.create": "创建商品",
-  "product.update": "更新商品信息",
-  "product.soft_delete": "商品移入回收站",
-  "sku.create": "创建 SKU",
-  "sku.update": "更新 SKU",
-  "sku.delete": "删除 SKU",
-  "asset.upload": "上传素材",
-  "asset.update": "更新素材元数据",
-  "asset.batch": "批量处理素材",
-  "asset.regenerate_thumbnail": "重建素材缩略图",
-  "trash.restore": "从回收站恢复数据",
-  "asset.version_append": "上传素材新版本",
-  "asset.version_switch": "切换素材当前版本",
-  "asset.version_review": "审核素材版本",
-  "product.master_lock": "锁定商品母图",
-  "product.master_primary": "切换商品主母图",
-  "product.master_unlock": "解除/替换商品母图",
-  "store.create": "创建店铺",
-  "store.update": "更新店铺",
-  "listing.create": "创建上架链接",
-  "listing.duplicate": "复制上架链接",
-  "listing.asset_set_update": "更新上架素材组",
-  "listing.pdp_version_create": "固化 PDP 文案版本"
-};
+import { formatDateTime } from "../utils/format";
+import { formatActivityAction, formatJobType, formatObjectType } from "../utils/labels";
 
 export function DashboardPage() {
   const [data, setData] = useState<DashboardResponse | null>(null);
@@ -63,10 +33,22 @@ export function DashboardPage() {
     ? [
         { label: "商品档案", value: data.counts.products, hint: "未软删除商品数", to: "/products" },
         { label: "数字素材", value: data.counts.assets, hint: "未软删除素材数", to: "/assets" },
-        { label: "待审核版本", value: data.counts.pendingReviews, hint: "按素材版本统计", to: "/assets" },
+        {
+          label: "待审核版本",
+          value: data.counts.pendingReviews,
+          hint: "点击直达待审核队列",
+          to: "/assets?reviewStatus=pending",
+          highlight: data.counts.pendingReviews > 0 ? "amber" : undefined
+        },
         { label: "上架草稿", value: data.counts.draftListings, hint: "草稿状态 Listing", to: "/listings?status=draft" },
         { label: "执行中任务", value: data.counts.runningJobs, hint: "排队与运行中", to: "/jobs" },
-        { label: "失败任务", value: data.counts.failedJobs, hint: "需关注重试", to: "/jobs" }
+        {
+          label: "失败任务",
+          value: data.counts.failedJobs,
+          hint: "需关注重试",
+          to: "/jobs",
+          highlight: data.counts.failedJobs > 0 ? "rose" : undefined
+        }
       ]
     : [];
 
@@ -91,6 +73,7 @@ export function DashboardPage() {
             to="/listings"
             className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
           >
+            <Layers className="h-3.5 w-3.5" />
             <span>上架工作台</span>
           </Link>
           <Link
@@ -123,8 +106,21 @@ export function DashboardPage() {
         {stats.map((card) => {
           const content = (
             <>
-              <div className="text-xs font-medium text-gray-500">{card.label}</div>
-              <div className="font-mono-tabular mt-1.5 text-2xl font-semibold text-gray-900">
+              <div className="flex items-center justify-between text-xs font-medium text-gray-500">
+                <span>{card.label}</span>
+                {card.to && (
+                  <ArrowUpRight className="h-3.5 w-3.5 text-gray-300 transition-colors group-hover:text-blue-600" />
+                )}
+              </div>
+              <div
+                className={`font-mono-tabular mt-1.5 text-2xl font-semibold ${
+                  card.highlight === "rose"
+                    ? "text-rose-600"
+                    : card.highlight === "amber"
+                      ? "text-amber-600"
+                      : "text-gray-900"
+                }`}
+              >
                 {card.value}
               </div>
               <div className="mt-1 text-[11px] text-gray-400">{card.hint}</div>
@@ -134,7 +130,7 @@ export function DashboardPage() {
             <Link
               key={card.label}
               to={card.to}
-              className="rounded-xl border border-gray-200 bg-white p-4 transition-colors hover:border-blue-300"
+              className="group rounded-xl border border-gray-200 bg-white p-4 transition-colors hover:border-blue-300 hover:bg-blue-50/15"
             >
               {content}
             </Link>
@@ -187,8 +183,11 @@ export function DashboardPage() {
               {data.recentJobs.map((job) => (
                 <div key={job.id} className="flex items-center justify-between py-2.5">
                   <div className="min-w-0">
-                    <div className="font-mono-tabular text-xs font-medium text-gray-900">
-                      {job.type} · {job.id.slice(0, 8)}
+                    <div className="flex items-center gap-2 text-xs font-medium text-gray-900">
+                      <span>{formatJobType(job.type)}</span>
+                      <span className="font-mono-tabular text-[11px] font-normal text-gray-400">
+                        #{job.id.slice(0, 8)}
+                      </span>
                     </div>
                     <div className="mt-0.5 text-[11px] text-gray-500">
                       {job.progressStage || "等待调度"}
@@ -203,7 +202,15 @@ export function DashboardPage() {
       </div>
 
       <section className="rounded-xl border border-gray-200 bg-white p-4">
-        <h2 className="mb-3 text-sm font-semibold text-gray-900">最近系统活动（审计流）</h2>
+        <div className="mb-3 flex items-center justify-between">
+          <h2 className="text-sm font-semibold text-gray-900">最近系统活动（审计流）</h2>
+          <Link
+            to="/jobs?tab=activities"
+            className="text-xs font-medium text-blue-600 hover:text-blue-700"
+          >
+            查看完整记录 →
+          </Link>
+        </div>
         {!data || data.recentActivities.length === 0 ? (
           <p className="py-6 text-center text-xs text-gray-400">暂无审计事件</p>
         ) : (
@@ -213,15 +220,21 @@ export function DashboardPage() {
                 key={evt.id}
                 className="flex flex-col justify-between gap-1 py-2.5 sm:flex-row sm:items-center"
               >
-                <div className="text-xs text-gray-800">
-                  <span className="font-medium">{ACTION_LABELS[evt.action] || evt.action}</span>
-                  <span className="font-mono-tabular ml-2 text-gray-400">
-                    {evt.objectType}
-                    {evt.objectId ? `#${evt.objectId.slice(0, 8)}` : ""}
+                <div className="flex flex-wrap items-center gap-2 text-xs text-gray-800">
+                  <span className="font-medium" title={evt.action}>
+                    {formatActivityAction(evt.action)}
                   </span>
+                  <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-600">
+                    {formatObjectType(evt.objectType)}
+                  </span>
+                  {evt.objectId && (
+                    <span className="font-mono-tabular text-[11px] text-gray-400">
+                      #{evt.objectId.slice(0, 8)}
+                    </span>
+                  )}
                 </div>
                 <div className="font-mono-tabular text-[11px] text-gray-500">
-                  {new Date(evt.createdAt).toLocaleString("zh-CN")}
+                  {formatDateTime(evt.createdAt)}
                 </div>
               </div>
             ))}

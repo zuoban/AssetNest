@@ -35,6 +35,7 @@ import type {
 } from "../../shared/types";
 import { api, ApiClientError } from "../api/client";
 import { AssetLightbox } from "../components/AssetLightbox";
+import { ConfirmDialog, type ConfirmDialogState } from "../components/ConfirmDialog";
 import {
   formatAspectRatio,
   formatBytes,
@@ -70,6 +71,8 @@ export function ProductDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [tab, setTab] = useState<"overview" | "skus" | "assets" | "listings">("overview");
+  const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
 
   // Editable product state
   const [spu, setSpu] = useState("");
@@ -352,17 +355,28 @@ export function ProductDetailPage() {
     }
   };
 
-  const handleDeleteSku = async (sku: SkuRecord) => {
+  const handleDeleteSku = (sku: SkuRecord) => {
     if (!id) return;
-    if (!window.confirm(`确定删除 SKU「${sku.code}（${sku.name}）」吗？`)) return;
-    setError(null);
-    try {
-      await api.deleteSku(id, sku.id);
-      setNotice(`已删除 SKU ${sku.code}`);
-      await loadAll();
-    } catch (err) {
-      setError(err instanceof ApiClientError ? err.message : "删除 SKU 失败");
-    }
+    setConfirmDialog({
+      title: "删除 SKU",
+      description: `确定删除 SKU「${sku.code}（${sku.name}）」吗？删除后将无法恢复。`,
+      confirmLabel: "确认删除",
+      tone: "danger",
+      onConfirm: async () => {
+        setConfirmBusy(true);
+        setError(null);
+        try {
+          await api.deleteSku(id, sku.id);
+          setConfirmDialog(null);
+          setNotice(`已删除 SKU ${sku.code}`);
+          await loadAll();
+        } catch (err) {
+          setError(err instanceof ApiClientError ? err.message : "删除 SKU 失败");
+        } finally {
+          setConfirmBusy(false);
+        }
+      }
+    });
   };
 
   const handleUploadLinkedAssets = async (files: FileList | null) => {
@@ -681,7 +695,17 @@ export function ProductDetailPage() {
       {tab === "overview" && (
         <form onSubmit={handleSaveOverview} className="space-y-4 text-xs">
           <section className="rounded-xl border border-gray-200 bg-white p-5">
-            <h2 className="mb-3.5 text-sm font-semibold text-gray-900">商品主数据</h2>
+            <div className="mb-3.5 flex items-center justify-between gap-2">
+              <h2 className="text-sm font-semibold text-gray-900">商品主数据</h2>
+              <button
+                type="submit"
+                disabled={saving}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-50"
+              >
+                <Save className="h-3.5 w-3.5" />
+                <span>{saving ? "保存中..." : "保存信息"}</span>
+              </button>
+            </div>
             <div className="grid grid-cols-1 gap-3.5 sm:grid-cols-2 lg:grid-cols-3">
               <div>
                 <label className="mb-1 block font-medium text-gray-700">SPU 编码</label>
@@ -1088,7 +1112,7 @@ export function ProductDetailPage() {
                   <span>已锁定商品母图（多视角）</span>
                 </h2>
                 <p className="mt-0.5 text-[11px] text-gray-500">
-                  母图固定指向具体的不可变版本（asset_version_id）；后续上传新版本不会自动覆盖已锁定母图。
+                  母图固定指向具体的不可变素材版本；后续上传新版本不会自动覆盖已锁定母图。
                 </p>
               </div>
               <span className="font-mono-tabular rounded bg-gray-100 px-2 py-0.5 text-[11px] text-gray-600">
@@ -2142,6 +2166,12 @@ export function ProductDetailPage() {
           </div>
         </div>
       )}
+
+      <ConfirmDialog
+        dialog={confirmDialog}
+        busy={confirmBusy}
+        onClose={() => setConfirmDialog(null)}
+      />
     </div>
   );
 }

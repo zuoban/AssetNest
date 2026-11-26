@@ -20,6 +20,7 @@ import type {
   StoreStatus
 } from "../../shared/types";
 import { api, ApiClientError } from "../api/client";
+import { ConfirmDialog, type ConfirmDialogState } from "../components/ConfirmDialog";
 import { formatDateTime } from "../utils/format";
 
 type PageTab = "stores" | "dictionaries";
@@ -35,6 +36,8 @@ export function StoresPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
 
   const [stores, setStores] = useState<StoreRecord[]>([]);
   const [dictionaries, setDictionaries] = useState<DictionariesResponse | null>(null);
@@ -178,23 +181,33 @@ export function StoresPage() {
     }
   };
 
-  const handleDeleteStore = async (store: StoreRecord) => {
-    if (!window.confirm(`确认删除店铺「${store.name}」？若店铺下已有上架链接将禁止删除。`)) {
-      return;
-    }
-    setError(null);
-    setNotice(null);
-    try {
-      await api.deleteStore(store.id);
-      setNotice(`已删除店铺「${store.name}」`);
-      await loadData();
-    } catch (err) {
-      if (err instanceof ApiClientError && err.status === 409) {
-        setError(err.message);
-      } else {
-        setError(err instanceof Error ? err.message : "删除店铺失败");
+  const handleDeleteStore = (store: StoreRecord) => {
+    setConfirmDialog({
+      title: "删除店铺",
+      description: `确认删除店铺「${store.name}」吗？若店铺下已有上架链接，系统将阻止删除。`,
+      confirmLabel: "删除店铺",
+      tone: "danger",
+      onConfirm: async () => {
+        setConfirmBusy(true);
+        setError(null);
+        setNotice(null);
+        try {
+          await api.deleteStore(store.id);
+          setConfirmDialog(null);
+          setNotice(`已删除店铺「${store.name}」`);
+          await loadData();
+        } catch (err) {
+          setConfirmDialog(null);
+          if (err instanceof ApiClientError && err.status === 409) {
+            setError(err.message);
+          } else {
+            setError(err instanceof Error ? err.message : "删除店铺失败");
+          }
+        } finally {
+          setConfirmBusy(false);
+        }
       }
-    }
+    });
   };
 
   const handleAddDictionary = async (e: React.FormEvent) => {
@@ -689,6 +702,12 @@ export function StoresPage() {
           </div>
         </div>
       )}
+
+      <ConfirmDialog
+        dialog={confirmDialog}
+        busy={confirmBusy}
+        onClose={() => setConfirmDialog(null)}
+      />
     </div>
   );
 }

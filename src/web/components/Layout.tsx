@@ -1,8 +1,10 @@
-import { useState, type ReactNode } from "react";
-import { NavLink } from "react-router-dom";
+import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { Link, NavLink, useLocation } from "react-router-dom";
 import {
   Activity,
+  AlertTriangle,
   Box,
+  Clock,
   HardDrive,
   Images,
   LayoutDashboard,
@@ -16,7 +18,8 @@ import {
   Trash2,
   X
 } from "lucide-react";
-import type { AuthMeResponse } from "../../shared/types";
+import type { AuthMeResponse, StorageProviderSummary } from "../../shared/types";
+import { api } from "../api/client";
 
 interface LayoutProps {
   auth: AuthMeResponse;
@@ -37,9 +40,50 @@ const NAV_ITEMS = [
   { to: "/settings", label: "通用设置", icon: Settings, end: false }
 ];
 
+function resolvePageSection(pathname: string): { title: string; wide: boolean } {
+  if (pathname === "/") return { title: "工作台", wide: false };
+  if (pathname.startsWith("/products/")) return { title: "商品中心 · 商品详情", wide: false };
+  if (pathname.startsWith("/products")) return { title: "商品中心", wide: false };
+  if (pathname.startsWith("/listings/")) return { title: "上架工作台 · 链接编排", wide: true };
+  if (pathname.startsWith("/listings")) return { title: "上架工作台", wide: false };
+  if (pathname.startsWith("/templates")) return { title: "导出模板规则", wide: false };
+  if (pathname.startsWith("/assets")) return { title: "全部素材 · 三栏工作台", wide: true };
+  if (pathname.startsWith("/stores")) return { title: "店铺与渠道字典", wide: false };
+  if (pathname.startsWith("/trash")) return { title: "回收站与安全 GC", wide: false };
+  if (pathname.startsWith("/storage")) return { title: "存储管理", wide: false };
+  if (pathname.startsWith("/jobs")) return { title: "任务与审计日志", wide: false };
+  if (pathname.startsWith("/settings")) return { title: "通用设置与备份", wide: false };
+  return { title: "AssetNest", wide: false };
+}
+
 export function Layout({ auth, onLogout, children }: LayoutProps) {
+  const location = useLocation();
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
+  const [offlineStorages, setOfflineStorages] = useState<StorageProviderSummary[]>([]);
+  const [runningJobs, setRunningJobs] = useState(0);
+  const [failedJobs, setFailedJobs] = useState(0);
+
+  const refreshSystemSignals = useCallback(async () => {
+    try {
+      const dash = await api.getDashboard();
+      setRunningJobs(dash.counts.runningJobs);
+      setFailedJobs(dash.counts.failedJobs);
+      setOfflineStorages(
+        dash.storageSummary.filter(
+          (st) => st.status === "offline" || st.status === "missing_config" || st.status === "degraded"
+        )
+      );
+    } catch {
+      // Keep layout non-blocking if transient poll fails
+    }
+  }, []);
+
+  useEffect(() => {
+    void refreshSystemSignals();
+  }, [location.pathname, refreshSystemSignals]);
+
+  const pageMeta = resolvePageSection(location.pathname);
 
   const handleLogout = async () => {
     setLoggingOut(true);
@@ -135,8 +179,8 @@ export function Layout({ auth, onLogout, children }: LayoutProps) {
       )}
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="sticky top-0 z-20 flex h-14 items-center justify-between border-b border-gray-200 bg-white/95 px-4 backdrop-blur-sm lg:px-6">
-          <div className="flex items-center gap-3">
+        <header className="sticky top-0 z-20 flex h-13 items-center justify-between gap-3 border-b border-gray-200 bg-white/95 px-4 backdrop-blur-sm lg:px-6">
+          <div className="flex min-w-0 items-center gap-3">
             <button
               type="button"
               aria-label="打开导航"
@@ -145,14 +189,49 @@ export function Layout({ auth, onLogout, children }: LayoutProps) {
             >
               <Menu className="h-4 w-4" />
             </button>
-            <span className="text-sm font-medium text-gray-600">
-              跨境电商数字资产管理平台 · 单实例自托管
-            </span>
+            <span className="truncate text-sm font-medium text-gray-800">{pageMeta.title}</span>
           </div>
-          <div className="font-mono-tabular text-xs text-gray-500">时区：{auth.timezone}</div>
+          <div className="flex shrink-0 items-center gap-2.5">
+            {offlineStorages.length > 0 && (
+              <Link
+                to="/storage"
+                className="inline-flex items-center gap-1.5 rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-[11px] font-medium text-amber-800 transition-colors hover:bg-amber-100"
+              >
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0 text-amber-600" />
+                <span>{offlineStorages.length} 个存储异常</span>
+              </Link>
+            )}
+            {runningJobs > 0 && (
+              <Link
+                to="/jobs"
+                className="inline-flex items-center gap-1.5 rounded-full border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] font-medium text-blue-700 transition-colors hover:bg-blue-100"
+              >
+                <Clock className="h-3.5 w-3.5 shrink-0 animate-pulse" />
+                <span className="font-mono-tabular">{runningJobs} 个任务运行中</span>
+              </Link>
+            )}
+            {failedJobs > 0 && (
+              <Link
+                to="/jobs"
+                className="inline-flex items-center gap-1.5 rounded-full border border-rose-200 bg-rose-50 px-2.5 py-1 text-[11px] font-medium text-rose-700 transition-colors hover:bg-rose-100"
+              >
+                <AlertTriangle className="h-3.5 w-3.5 shrink-0" />
+                <span className="font-mono-tabular">{failedJobs} 个失败任务</span>
+              </Link>
+            )}
+            <div className="font-mono-tabular hidden text-xs text-gray-500 sm:block">
+              时区：{auth.timezone}
+            </div>
+          </div>
         </header>
 
-        <main className="mx-auto w-full max-w-[1400px] flex-1 p-4 lg:p-6">{children}</main>
+        <main
+          className={`mx-auto w-full flex-1 p-4 lg:p-5 ${
+            pageMeta.wide ? "max-w-[1680px]" : "max-w-[1400px]"
+          }`}
+        >
+          {children}
+        </main>
       </div>
     </div>
   );

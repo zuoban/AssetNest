@@ -59,6 +59,7 @@ import type {
   StoreRecord
 } from "../../shared/types";
 import { api } from "../api/client";
+import { ConfirmDialog, type ConfirmDialogState } from "../components/ConfirmDialog";
 import { ListingReleasePanel } from "../components/ListingReleasePanel";
 import {
   countCodePoints,
@@ -310,6 +311,8 @@ export function ListingWorkbenchPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
 
   const [listing, setListing] = useState<ListingDetail | null>(null);
   const [product, setProduct] = useState<ProductDetail | null>(null);
@@ -703,41 +706,56 @@ export function ListingWorkbenchPage() {
     }
   };
 
-  const handleRestorePdpVersion = async (ver: PdpVersionRecord) => {
+  const handleRestorePdpVersion = (ver: PdpVersionRecord) => {
     if (!id) return;
-    if (
-      !window.confirm(
-        `确认将历史版本 V${ver.versionNo} 恢复为新的当前草稿？原有历史版本保持只读不被覆盖。`
-      )
-    ) {
-      return;
-    }
-    setError(null);
-    try {
-      const restored = await api.restoreListingPdpVersion(id, ver.id);
-      setPdp(restored);
-      setPdpLang(restored.draft.language);
-      setPdpContent(restored.draft.content);
-      setPreviewVersion(null);
-      flashNotice(`已将 V${ver.versionNo} 恢复为当前草稿（修订 #${restored.draft.revision}）`);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "恢复 PDP 版本失败");
-    }
+    setConfirmDialog({
+      title: `恢复历史版本 V${ver.versionNo}`,
+      description: `确认将历史版本 V${ver.versionNo} 恢复为新的当前草稿吗？原有历史版本保持只读不被覆盖。`,
+      confirmLabel: "恢复为草稿",
+      tone: "warning",
+      onConfirm: async () => {
+        setConfirmBusy(true);
+        setError(null);
+        try {
+          const restored = await api.restoreListingPdpVersion(id, ver.id);
+          setPdp(restored);
+          setPdpLang(restored.draft.language);
+          setPdpContent(restored.draft.content);
+          setPreviewVersion(null);
+          setConfirmDialog(null);
+          flashNotice(`已将 V${ver.versionNo} 恢复为当前草稿（修订 #${restored.draft.revision}）`);
+        } catch (err) {
+          setError(err instanceof Error ? err.message : "恢复 PDP 版本失败");
+        } finally {
+          setConfirmBusy(false);
+        }
+      }
+    });
   };
 
   const handleImportProductSpecs = () => {
     if (!pdp || pdp.productSpecs.length === 0) return;
-    if (
-      pdpContent.specs.length > 0 &&
-      !window.confirm("确认用商品当前公共规格更新草稿中的规格表？（未保存前仍可撤销）")
-    ) {
+    const applySpecs = () => {
+      setPdpContent({
+        ...pdpContent,
+        specs: pdp.productSpecs.map((s) => ({ ...s }))
+      });
+      flashNotice("已从商品公共规格导入到草稿，请确认后点击「保存草稿」");
+    };
+    if (pdpContent.specs.length > 0) {
+      setConfirmDialog({
+        title: "导入商品公共规格",
+        description: "确认用商品当前公共规格覆盖草稿中的规格表吗？（未保存草稿前仍可放弃修改）",
+        confirmLabel: "覆盖规格表",
+        tone: "warning",
+        onConfirm: () => {
+          applySpecs();
+          setConfirmDialog(null);
+        }
+      });
       return;
     }
-    setPdpContent({
-      ...pdpContent,
-      specs: pdp.productSpecs.map((s) => ({ ...s }))
-    });
-    flashNotice("已从商品公共规格导入到草稿，请确认后点击「保存草稿」");
+    applySpecs();
   };
 
   const handleCopyPdpToTarget = async (e: React.FormEvent) => {
@@ -2365,6 +2383,12 @@ export function ListingWorkbenchPage() {
           </div>
         </div>
       )}
+
+      <ConfirmDialog
+        dialog={confirmDialog}
+        busy={confirmBusy}
+        onClose={() => setConfirmDialog(null)}
+      />
     </div>
   );
 }

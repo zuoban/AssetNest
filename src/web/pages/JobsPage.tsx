@@ -1,23 +1,16 @@
 import { useCallback, useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { AlertCircle, CheckCircle2, RefreshCw, RotateCw, XCircle } from "lucide-react";
-import type { ActivityRecord, JobRecord, JobType } from "../../shared/types";
+import type { ActivityRecord, JobRecord } from "../../shared/types";
 import { api, ApiClientError } from "../api/client";
 import { JobStatusBadge } from "../components/StatusBadge";
 import { formatDateTime } from "../utils/format";
-
-const JOB_TYPE_LABELS: Record<JobType, string> = {
-  storage_migrate: "跨存储迁移",
-  storage_cleanup: "来源对象清理",
-  gc: "引用保护 GC",
-  backup: "一致性备份",
-  restore: "备份恢复",
-  export_zip: "上架包导出",
-  thumbnail: "缩略图生成",
-  search_reindex: "搜索索引重建"
-};
+import { formatActivityAction, formatJobType, formatObjectType } from "../utils/labels";
 
 export function JobsPage() {
-  const [tab, setTab] = useState<"jobs" | "activities">("jobs");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const initialTab = searchParams.get("tab") === "activities" ? "activities" : "jobs";
+  const [tab, setTab] = useState<"jobs" | "activities">(initialTab);
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [activities, setActivities] = useState<ActivityRecord[]>([]);
   const [loading, setLoading] = useState(true);
@@ -109,7 +102,10 @@ export function JobsPage() {
       <div className="inline-flex rounded-lg border border-gray-200 bg-white p-1 text-xs font-medium">
         <button
           type="button"
-          onClick={() => setTab("jobs")}
+          onClick={() => {
+            setTab("jobs");
+            setSearchParams({}, { replace: true });
+          }}
           className={`rounded-md px-3 py-1.5 transition-colors ${
             tab === "jobs" ? "bg-blue-600 text-white" : "text-gray-600 hover:text-gray-900"
           }`}
@@ -118,7 +114,10 @@ export function JobsPage() {
         </button>
         <button
           type="button"
-          onClick={() => setTab("activities")}
+          onClick={() => {
+            setTab("activities");
+            setSearchParams({ tab: "activities" }, { replace: true });
+          }}
           className={`rounded-md px-3 py-1.5 transition-colors ${
             tab === "activities" ? "bg-blue-600 text-white" : "text-gray-600 hover:text-gray-900"
           }`}
@@ -170,7 +169,7 @@ export function JobsPage() {
                     <tr key={job.id} className="align-top hover:bg-gray-50/70">
                       <td className="px-4 py-3">
                         <div className="font-medium text-gray-900">
-                          {JOB_TYPE_LABELS[job.type] ?? job.type}
+                          {formatJobType(job.type)}
                         </div>
                         <div className="font-mono-tabular text-[11px] text-gray-500">
                           {job.type} · {job.id.slice(0, 8)}
@@ -271,19 +270,30 @@ export function JobsPage() {
               </thead>
               <tbody className="divide-y divide-gray-100">
                 {activities.map((evt) => (
-                  <tr key={evt.id}>
-                    <td className="font-mono-tabular px-4 py-3 font-medium text-gray-900">
-                      {evt.action}
+                  <tr key={evt.id} className="hover:bg-gray-50/70">
+                    <td className="px-4 py-3">
+                      <div className="font-medium text-gray-900">
+                        {formatActivityAction(evt.action)}
+                      </div>
+                      <div className="font-mono-tabular text-[10px] text-gray-400">
+                        {evt.action}
+                      </div>
                     </td>
-                    <td className="font-mono-tabular px-4 py-3 text-gray-600">
-                      {evt.objectType}
-                      {evt.objectId ? `:${evt.objectId.slice(0, 8)}` : ""}
+                    <td className="px-4 py-3 text-gray-600">
+                      <span className="rounded bg-gray-100 px-1.5 py-0.5 text-[11px] text-gray-700">
+                        {formatObjectType(evt.objectType)}
+                      </span>
+                      {evt.objectId && (
+                        <span className="font-mono-tabular ml-1.5 text-[11px] text-gray-400">
+                          #{evt.objectId.slice(0, 8)}
+                        </span>
+                      )}
                     </td>
                     <td className="font-mono-tabular max-w-md truncate px-4 py-3 text-gray-500">
                       {JSON.stringify(evt.details)}
                     </td>
                     <td className="font-mono-tabular px-4 py-3 text-gray-500">
-                      {new Date(evt.createdAt).toLocaleString("zh-CN")}
+                      {formatDateTime(evt.createdAt)}
                     </td>
                   </tr>
                 ))}

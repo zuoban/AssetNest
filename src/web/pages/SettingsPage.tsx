@@ -18,6 +18,7 @@ import type {
   RestoreBackupResult
 } from "../../shared/types";
 import { api, ApiClientError } from "../api/client";
+import { ConfirmDialog, type ConfirmDialogState } from "../components/ConfirmDialog";
 import { formatBytes, formatDateTime } from "../utils/format";
 
 interface SettingsPageProps {
@@ -37,6 +38,7 @@ export function SettingsPage({ onTimezoneChanged }: SettingsPageProps) {
   const [clearingCache, setClearingCache] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedMsg, setSavedMsg] = useState<string | null>(null);
+  const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null);
   const restoreFileInputRef = useRef<HTMLInputElement | null>(null);
 
   const load = useCallback(async () => {
@@ -83,65 +85,79 @@ export function SettingsPage({ onTimezoneChanged }: SettingsPageProps) {
     }
   };
 
-  const handleRestoreById = async (backup: BackupRecord) => {
-    const confirmed = window.confirm(
-      `确认从备份 ${backup.id.slice(0, 8)}（${backup.kind === "full" ? "完整备份" : "元数据备份"}）进入维护模式恢复？\n` +
-        "恢复前将自动校验 SHA-256 与数据库完整性，并在覆盖当前库之前保留 .pre-restore 自动回滚点。"
-    );
-    if (!confirmed) return;
-    setRestoringBackup(true);
-    setError(null);
-    setSavedMsg(null);
-    setRestoreResult(null);
-    try {
-      const res = await api.restoreBackupById(backup.id);
-      setRestoreResult(res);
-      const totalIndexed =
-        res.reindexed.products + res.reindexed.assets + res.reindexed.listings;
-      setSavedMsg(
-        `备份恢复成功：已校验并切换数据库（Schema v${res.schemaVersion}），恢复 ${res.restoredFileCount} 个物理文件，重建 ${totalIndexed} 条 FTS 索引。`
-      );
-      await load();
-      if (onTimezoneChanged) {
-        await onTimezoneChanged();
+  const handleRestoreById = (backup: BackupRecord) => {
+    setConfirmDialog({
+      title: "从历史备份恢复数据",
+      description:
+        `确认从备份 ${backup.id.slice(0, 8)}（${backup.kind === "full" ? "完整备份" : "元数据备份"}）进入维护模式恢复吗？\n` +
+        "恢复前将自动校验 SHA-256 与数据库完整性，并在覆盖当前库之前保留 .pre-restore 自动回滚点。",
+      confirmLabel: "进入维护模式并恢复",
+      tone: "danger",
+      onConfirm: async () => {
+        setRestoringBackup(true);
+        setError(null);
+        setSavedMsg(null);
+        setRestoreResult(null);
+        try {
+          const res = await api.restoreBackupById(backup.id);
+          setRestoreResult(res);
+          setConfirmDialog(null);
+          const totalIndexed =
+            res.reindexed.products + res.reindexed.assets + res.reindexed.listings;
+          setSavedMsg(
+            `备份恢复成功：已校验并切换数据库（Schema v${res.schemaVersion}），恢复 ${res.restoredFileCount} 个物理文件，重建 ${totalIndexed} 条 FTS 索引。`
+          );
+          await load();
+          if (onTimezoneChanged) {
+            await onTimezoneChanged();
+          }
+        } catch (err) {
+          setConfirmDialog(null);
+          setError(err instanceof ApiClientError ? err.message : "从备份恢复失败");
+        } finally {
+          setRestoringBackup(false);
+        }
       }
-    } catch (err) {
-      setError(err instanceof ApiClientError ? err.message : "从备份恢复失败");
-    } finally {
-      setRestoringBackup(false);
-    }
+    });
   };
 
-  const handleRestoreFileChange = async (event: ChangeEvent<HTMLInputElement>) => {
+  const handleRestoreFileChange = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     event.target.value = "";
     if (!file) return;
-    const confirmed = window.confirm(
-      `确认上传并从备份包「${file.name}」进入维护模式恢复？\n` +
-        "校验不通过时将直接拒绝并保持当前实例数据完好无损。"
-    );
-    if (!confirmed) return;
-    setRestoringBackup(true);
-    setError(null);
-    setSavedMsg(null);
-    setRestoreResult(null);
-    try {
-      const res = await api.restoreBackupUpload(file);
-      setRestoreResult(res);
-      const totalIndexed =
-        res.reindexed.products + res.reindexed.assets + res.reindexed.listings;
-      setSavedMsg(
-        `上传备份恢复成功：已切换数据库（Schema v${res.schemaVersion}），恢复 ${res.restoredFileCount} 个物理文件，重建 ${totalIndexed} 条 FTS 索引。`
-      );
-      await load();
-      if (onTimezoneChanged) {
-        await onTimezoneChanged();
+    setConfirmDialog({
+      title: "上传备份包并恢复",
+      description:
+        `确认上传并从备份包「${file.name}」进入维护模式恢复吗？\n` +
+        "校验不通过时将直接拒绝并保持当前实例数据完好无损。",
+      confirmLabel: "上传并恢复",
+      tone: "danger",
+      onConfirm: async () => {
+        setRestoringBackup(true);
+        setError(null);
+        setSavedMsg(null);
+        setRestoreResult(null);
+        try {
+          const res = await api.restoreBackupUpload(file);
+          setRestoreResult(res);
+          setConfirmDialog(null);
+          const totalIndexed =
+            res.reindexed.products + res.reindexed.assets + res.reindexed.listings;
+          setSavedMsg(
+            `上传备份恢复成功：已切换数据库（Schema v${res.schemaVersion}），恢复 ${res.restoredFileCount} 个物理文件，重建 ${totalIndexed} 条 FTS 索引。`
+          );
+          await load();
+          if (onTimezoneChanged) {
+            await onTimezoneChanged();
+          }
+        } catch (err) {
+          setConfirmDialog(null);
+          setError(err instanceof ApiClientError ? err.message : "上传备份包恢复失败");
+        } finally {
+          setRestoringBackup(false);
+        }
       }
-    } catch (err) {
-      setError(err instanceof ApiClientError ? err.message : "上传备份包恢复失败");
-    } finally {
-      setRestoringBackup(false);
-    }
+    });
   };
 
   const handleClearCache = async () => {
@@ -475,6 +491,12 @@ export function SettingsPage({ onTimezoneChanged }: SettingsPageProps) {
           <span>{clearingCache ? "正在清理..." : "清理本地缩略图缓存"}</span>
         </button>
       </section>
+
+      <ConfirmDialog
+        dialog={confirmDialog}
+        busy={restoringBackup}
+        onClose={() => setConfirmDialog(null)}
+      />
     </div>
   );
 }

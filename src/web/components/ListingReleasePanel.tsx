@@ -24,6 +24,7 @@ import type {
 } from "../../shared/types";
 import { api, ApiClientError } from "../api/client";
 import { formatBytes, formatDateTime } from "../utils/format";
+import { formatValidationCode, VALIDATION_TARGET_LABELS } from "../utils/labels";
 
 interface ListingReleasePanelProps {
   listing: ListingDetail;
@@ -291,12 +292,20 @@ export function ListingReleasePanel({ listing }: ListingReleasePanelProps) {
                   <AlertCircle className="h-4 w-4" />
                   阻断错误（必须修复后才能创建正式 Release）
                 </div>
-                <ul className="space-y-1 text-xs text-rose-700">
+                <ul className="space-y-1.5 text-xs text-rose-700">
                   {validation.blockers.map((issue, idx) => (
                     <li key={`${issue.code}-${idx}`} className="flex items-start gap-2">
-                      <span className="font-mono-tabular shrink-0 rounded bg-rose-100 px-1.5 py-0.5 text-[10px] text-rose-800">
-                        {issue.code}
+                      <span
+                        title={issue.code}
+                        className="shrink-0 rounded bg-rose-100 px-1.5 py-0.5 text-[10px] font-medium text-rose-800"
+                      >
+                        {formatValidationCode(issue.code)}
                       </span>
+                      {issue.targetKind && (
+                        <span className="shrink-0 rounded border border-rose-200 bg-white px-1.5 py-0.5 text-[10px] text-rose-700">
+                          {VALIDATION_TARGET_LABELS[issue.targetKind]}
+                        </span>
+                      )}
                       <span>{issue.message}</span>
                     </li>
                   ))}
@@ -310,12 +319,20 @@ export function ListingReleasePanel({ listing }: ListingReleasePanelProps) {
                   <AlertTriangle className="h-4 w-4" />
                   提醒项（不阻断发布，建议发布前人工核对）
                 </div>
-                <ul className="space-y-1 text-xs text-amber-800">
+                <ul className="space-y-1.5 text-xs text-amber-800">
                   {validation.warnings.map((issue, idx) => (
                     <li key={`${issue.code}-${idx}`} className="flex items-start gap-2">
-                      <span className="font-mono-tabular shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] text-amber-900">
-                        {issue.code}
+                      <span
+                        title={issue.code}
+                        className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-900"
+                      >
+                        {formatValidationCode(issue.code)}
                       </span>
+                      {issue.targetKind && (
+                        <span className="shrink-0 rounded border border-amber-200 bg-white px-1.5 py-0.5 text-[10px] text-amber-800">
+                          {VALIDATION_TARGET_LABELS[issue.targetKind]}
+                        </span>
+                      )}
                       <span>{issue.message}</span>
                     </li>
                   ))}

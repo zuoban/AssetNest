@@ -19,6 +19,7 @@ import type {
   StoreRecord
 } from "../../shared/types";
 import { api } from "../api/client";
+import { ConfirmDialog, type ConfirmDialogState } from "../components/ConfirmDialog";
 import { formatDateTime, LISTING_STATUS_META } from "../utils/format";
 
 export function ListingsPage() {
@@ -28,6 +29,8 @@ export function ListingsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
+  const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
 
   const [listings, setListings] = useState<ListingSummary[]>([]);
   const [total, setTotal] = useState(0);
@@ -210,19 +213,28 @@ export function ListingsPage() {
     }
   };
 
-  const handleDeleteListing = async (item: ListingSummary) => {
-    if (!window.confirm(`确认将上架链接「${item.displayName}」移入回收站？可在回收站恢复。`)) {
-      return;
-    }
-    setError(null);
-    setNotice(null);
-    try {
-      await api.deleteListing(item.id);
-      setNotice(`已将「${item.displayName}」移入回收站`);
-      await loadListings();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "删除上架链接失败");
-    }
+  const handleDeleteListing = (item: ListingSummary) => {
+    setConfirmDialog({
+      title: "移入回收站",
+      description: `确认将上架链接「${item.displayName}」移入回收站吗？移入后可在回收站恢复。`,
+      confirmLabel: "移入回收站",
+      tone: "danger",
+      onConfirm: async () => {
+        setConfirmBusy(true);
+        setError(null);
+        setNotice(null);
+        try {
+          await api.deleteListing(item.id);
+          setConfirmDialog(null);
+          setNotice(`已将「${item.displayName}」移入回收站`);
+          await loadListings();
+        } catch (err) {
+          setError(err instanceof Error ? err.message : "删除上架链接失败");
+        } finally {
+          setConfirmBusy(false);
+        }
+      }
+    });
   };
 
   const totalPages = Math.max(1, Math.ceil(total / pageSize));
@@ -450,8 +462,10 @@ export function ListingsPage() {
                         </div>
                       )}
                     </div>
+                  </div>
 
-                    <div className="mt-3 grid grid-cols-4 gap-1.5 rounded-lg border border-gray-100 bg-gray-50/80 p-2 text-center font-mono-tabular text-[11px]">
+                  <div className="mt-auto pt-3">
+                    <div className="grid grid-cols-4 gap-1.5 rounded-lg border border-gray-100 bg-gray-50/80 p-2 text-center font-mono-tabular text-[11px]">
                       <div>
                         <div className="text-gray-400">轮播</div>
                         <div className="font-semibold text-gray-900">{item.carouselCount}</div>
@@ -471,9 +485,8 @@ export function ListingsPage() {
                         <div className="font-semibold text-gray-900">{item.pdpVersionCount}</div>
                       </div>
                     </div>
-                  </div>
 
-                  <div className="mt-3 flex items-center justify-between border-t border-gray-100 pt-3">
+                    <div className="mt-3 flex items-center justify-between border-t border-gray-100 pt-3">
                     <span className="font-mono-tabular text-[11px] text-gray-400">
                       更新 {formatDateTime(item.updatedAt)}
                     </span>
@@ -489,8 +502,9 @@ export function ListingsPage() {
                       </button>
                       <button
                         type="button"
-                        onClick={() => void handleDeleteListing(item)}
+                        onClick={() => handleDeleteListing(item)}
                         title="移入回收站"
+                        aria-label="移入回收站"
                         className="rounded-md border border-rose-200 p-1 text-rose-600 hover:bg-rose-50"
                       >
                         <Trash2 className="h-3.5 w-3.5" />
@@ -503,6 +517,7 @@ export function ListingsPage() {
                         进入工作台
                       </Link>
                     </div>
+                  </div>
                   </div>
                 </div>
               );
@@ -761,6 +776,12 @@ export function ListingsPage() {
           </div>
         </div>
       )}
+
+      <ConfirmDialog
+        dialog={confirmDialog}
+        busy={confirmBusy}
+        onClose={() => setConfirmDialog(null)}
+      />
     </div>
   );
 }

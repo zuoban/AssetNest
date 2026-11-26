@@ -22,6 +22,7 @@ import {
   Maximize2,
   Plus,
   RefreshCw,
+  RotateCcw,
   Save,
   Search,
   Star,
@@ -44,6 +45,7 @@ import type {
 } from "../../shared/types";
 import { api, ApiClientError } from "../api/client";
 import { AssetLightbox } from "../components/AssetLightbox";
+import { ConfirmDialog, type ConfirmDialogState } from "../components/ConfirmDialog";
 import { StorageStatusBadge } from "../components/StatusBadge";
 import {
   ASSET_PURPOSES,
@@ -77,15 +79,32 @@ export function AssetsPage() {
   const [storages, setStorages] = useState<StorageProviderSummary[]>([]);
   const [stores, setStores] = useState<StoreRecord[]>([]);
 
+  const initialReviewParam = searchParams.get("reviewStatus");
+  const initialReviewStatus: ReviewStatus | "" =
+    initialReviewParam === "pending" ||
+    initialReviewParam === "approved" ||
+    initialReviewParam === "rejected"
+      ? initialReviewParam
+      : "";
+  const initialQuickViewParam = searchParams.get("quickView");
+  const initialQuickView: QuickView =
+    initialQuickViewParam === "favorite" ||
+    initialQuickViewParam === "pending" ||
+    initialQuickViewParam === "unfiled"
+      ? initialQuickViewParam
+      : initialReviewStatus === "pending"
+        ? "pending"
+        : "all";
+
   // Filter state
-  const [quickView, setQuickView] = useState<QuickView>("all");
+  const [quickView, setQuickView] = useState<QuickView>(initialQuickView);
   const [folderId, setFolderId] = useState<string>("");
   const [tagId, setTagId] = useState<string>("");
   const [storageId, setStorageId] = useState<string>("");
   const [productId, setProductId] = useState<string>(searchParams.get("productId") || "");
   const [storeId, setStoreId] = useState<string>("");
   const [assetType, setAssetType] = useState<AssetType | "">("");
-  const [reviewStatus, setReviewStatus] = useState<ReviewStatus | "">("");
+  const [reviewStatus, setReviewStatus] = useState<ReviewStatus | "">(initialReviewStatus);
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<"newest" | "oldest" | "name_asc" | "size_desc">("newest");
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
@@ -152,6 +171,8 @@ export function AssetsPage() {
 
   // Lightbox
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
+  const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null);
+  const [confirmBusy, setConfirmBusy] = useState(false);
 
   // Virtualization grid columns responsive to container width
   const [gridColumns, setGridColumns] = useState(4);
@@ -173,21 +194,28 @@ export function AssetsPage() {
   }, []);
 
   const loadTaxonomy = useCallback(async () => {
-    try {
-      const [folderRes, tagRes, productRes, storageRes, storeRes] = await Promise.all([
-        api.listFolders(),
-        api.listTags(),
-        api.listProducts({ page: 1, pageSize: 200 }),
-        api.getStorageProviders(),
-        api.listStores()
-      ]);
-      setFolders(folderRes.items);
-      setTags(tagRes.items);
-      setProducts(productRes.items);
-      setStorages(storageRes.items);
-      setStores(storeRes.items);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "加载分类和筛选数据失败");
+    const [folderRes, tagRes, productRes, storageRes, storeRes] = await Promise.allSettled([
+      api.listFolders(),
+      api.listTags(),
+      api.listProducts({ page: 1, pageSize: 100 }),
+      api.getStorageProviders(),
+      api.listStores()
+    ]);
+
+    const failures: string[] = [];
+    if (folderRes.status === "fulfilled") setFolders(folderRes.value.items);
+    else failures.push("文件夹");
+    if (tagRes.status === "fulfilled") setTags(tagRes.value.items);
+    else failures.push("标签");
+    if (productRes.status === "fulfilled") setProducts(productRes.value.items);
+    else failures.push("商品");
+    if (storageRes.status === "fulfilled") setStorages(storageRes.value.items);
+    else failures.push("存储位置");
+    if (storeRes.status === "fulfilled") setStores(storeRes.value.items);
+    else failures.push("店铺");
+
+    if (failures.length > 0) {
+      setError(`部分筛选项加载失败：${failures.join("、")}`);
     }
   }, []);
 
@@ -275,6 +303,47 @@ export function AssetsPage() {
     void loadActiveAsset(activeAssetId);
   }, [activeAssetId, loadActiveAsset]);
 
+  useEffect(() => {
+    if (!activeAssetId || lightboxIndex !== null || confirmDialog || uploadModalOpen) return;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && window.innerWidth < 1280) {
+        setActiveAssetId(null);
+        setActiveAsset(null);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [activeAssetId, lightboxIndex, confirmDialog, uploadModalOpen]);
+
+  const hasActiveFilters = Boolean(
+    quickView !== "all" ||
+      folderId ||
+      tagId ||
+      storageId ||
+      productId ||
+      storeId ||
+      assetType ||
+      reviewStatus ||
+      query.trim()
+  );
+
+  const resetAllFilters = () => {
+    setQuickView("all");
+    setFolderId("");
+    setTagId("");
+    setStorageId("");
+    setProductId("");
+    setStoreId("");
+    setAssetType("");
+    setReviewStatus("");
+    setQuery("");
+    const nextParams = new URLSearchParams(searchParams);
+    nextParams.delete("productId");
+    nextParams.delete("reviewStatus");
+    nextParams.delete("quickView");
+    setSearchParams(nextParams, { replace: true });
+  };
+
   const tagsByDimension = useMemo(() => {
     const grouped = new Map<TagDimension, TagRecord[]>();
     for (const dim of DIMENSION_ORDER) {
@@ -299,6 +368,11 @@ export function AssetsPage() {
 
   const selectQuickView = (view: QuickView) => {
     setQuickView(view);
+    if (view === "pending") {
+      setReviewStatus("pending");
+    } else if (reviewStatus === "pending") {
+      setReviewStatus("");
+    }
     if (view !== "all") {
       setFolderId("");
       setTagId("");
@@ -395,16 +469,27 @@ export function AssetsPage() {
     }
   };
 
-  const handleDeleteFolder = async (folder: FolderRecord) => {
-    if (!window.confirm(`确定删除文件夹「${folder.name}」吗？其中素材将变为未归类。`)) return;
-    setError(null);
-    try {
-      await api.deleteFolder(folder.id);
-      if (folderId === folder.id) setFolderId("");
-      await Promise.all([loadTaxonomy(), loadAssets()]);
-    } catch (err) {
-      setError(err instanceof ApiClientError ? err.message : "删除文件夹失败");
-    }
+  const handleDeleteFolder = (folder: FolderRecord) => {
+    setConfirmDialog({
+      title: "删除文件夹",
+      description: `确定删除文件夹「${folder.name}」吗？其中素材不会被删除，将自动变为未归类。`,
+      confirmLabel: "删除文件夹",
+      tone: "warning",
+      onConfirm: async () => {
+        setConfirmBusy(true);
+        setError(null);
+        try {
+          await api.deleteFolder(folder.id);
+          if (folderId === folder.id) setFolderId("");
+          setConfirmDialog(null);
+          await Promise.all([loadTaxonomy(), loadAssets()]);
+        } catch (err) {
+          setError(err instanceof ApiClientError ? err.message : "删除文件夹失败");
+        } finally {
+          setConfirmBusy(false);
+        }
+      }
+    });
   };
 
   const handleCreateTag = async () => {
@@ -532,21 +617,32 @@ export function AssetsPage() {
     }
   };
 
-  const handleSoftDeleteSingle = async (asset: AssetDetail) => {
-    if (!window.confirm(`确定将素材「${asset.name}」移入回收站吗？`)) return;
-    setError(null);
-    try {
-      await api.batchAssets({ assetIds: [asset.id], action: "soft_delete" });
-      setActiveAssetId(null);
-      setActiveAsset(null);
-      setNotice("素材已移入回收站");
-      await Promise.all([loadAssets(), loadTaxonomy()]);
-    } catch (err) {
-      setError(err instanceof ApiClientError ? err.message : "移入回收站失败");
-    }
+  const handleSoftDeleteSingle = (asset: AssetDetail) => {
+    setConfirmDialog({
+      title: "移入回收站",
+      description: `确定将素材「${asset.name}」移入回收站吗？后续可在回收站中恢复。`,
+      confirmLabel: "移入回收站",
+      tone: "danger",
+      onConfirm: async () => {
+        setConfirmBusy(true);
+        setError(null);
+        try {
+          await api.batchAssets({ assetIds: [asset.id], action: "soft_delete" });
+          setActiveAssetId(null);
+          setActiveAsset(null);
+          setConfirmDialog(null);
+          setNotice("素材已移入回收站");
+          await Promise.all([loadAssets(), loadTaxonomy()]);
+        } catch (err) {
+          setError(err instanceof ApiClientError ? err.message : "移入回收站失败");
+        } finally {
+          setConfirmBusy(false);
+        }
+      }
+    });
   };
 
-  const runBatch = async (
+  const executeBatch = async (
     action:
       | "move_folder"
       | "add_tags"
@@ -562,12 +658,6 @@ export function AssetsPage() {
   ) => {
     const assetIds = Array.from(selectedIds);
     if (assetIds.length === 0) return;
-    if (
-      action === "soft_delete" &&
-      !window.confirm(`确定将已选中的 ${assetIds.length} 个素材移入回收站吗？`)
-    ) {
-      return;
-    }
     setBatchBusy(true);
     setError(null);
     setNotice(null);
@@ -590,6 +680,38 @@ export function AssetsPage() {
     } finally {
       setBatchBusy(false);
     }
+  };
+
+  const runBatch = async (
+    action:
+      | "move_folder"
+      | "add_tags"
+      | "link_products"
+      | "set_review_status"
+      | "soft_delete",
+    extra: {
+      folderId?: string | null;
+      tagIds?: string[];
+      productIds?: string[];
+      reviewStatus?: ReviewStatus;
+    } = {}
+  ) => {
+    const assetIds = Array.from(selectedIds);
+    if (assetIds.length === 0) return;
+    if (action === "soft_delete") {
+      setConfirmDialog({
+        title: "批量移入回收站",
+        description: `确定将已选中的 ${assetIds.length} 个素材移入回收站吗？移入后可在回收站恢复。`,
+        confirmLabel: `移入回收站 (${assetIds.length})`,
+        tone: "danger",
+        onConfirm: async () => {
+          setConfirmDialog(null);
+          await executeBatch(action, extra);
+        }
+      });
+      return;
+    }
+    await executeBatch(action, extra);
   };
 
   const renderAssetIcon = (item: AssetListItem) => {
@@ -962,114 +1084,140 @@ export function AssetsPage() {
           )}
 
           {/* Filter Bar */}
-          <div className="flex flex-wrap items-center gap-2 border-b border-gray-200 bg-white px-3 py-2.5 text-xs">
-            <div className="relative min-w-[200px] flex-1">
-              <Search className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-gray-400" />
-              <input
-                type="text"
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="搜索文件名、SPU、标签、备注（支持中/英/泰）..."
-                className="w-full rounded-lg border border-gray-200 bg-gray-50 py-1.5 pr-3 pl-8 text-xs focus:border-blue-500 focus:bg-white focus:outline-none"
-              />
+          <div className="space-y-2 border-b border-gray-200 bg-white px-3 py-2.5 text-xs">
+            <div className="flex items-center gap-2">
+              <div className="relative min-w-0 flex-1">
+                <Search className="pointer-events-none absolute top-1/2 left-2.5 h-3.5 w-3.5 -translate-y-1/2 text-gray-400" />
+                <input
+                  type="text"
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="搜索文件名、SPU、标签、备注（支持中/英/泰）..."
+                  className="w-full rounded-lg border border-gray-200 bg-gray-50 py-1.5 pr-3 pl-8 text-xs focus:border-blue-500 focus:bg-white focus:outline-none"
+                />
+              </div>
+
+              <select
+                value={sort}
+                onChange={(e) =>
+                  setSort(e.target.value as "newest" | "oldest" | "name_asc" | "size_desc")
+                }
+                className="shrink-0 rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-xs text-gray-700 focus:border-blue-500 focus:outline-none"
+              >
+                <option value="newest">最新上传</option>
+                <option value="oldest">最早上传</option>
+                <option value="name_asc">名称 A-Z</option>
+                <option value="size_desc">体积从大到小</option>
+              </select>
+
+              <div className="flex shrink-0 items-center rounded-lg border border-gray-200 p-0.5">
+                <button
+                  type="button"
+                  onClick={() => setViewMode("grid")}
+                  className={`rounded p-1 ${
+                    viewMode === "grid"
+                      ? "bg-blue-50 text-blue-600"
+                      : "text-gray-500 hover:text-gray-700"
+                  }`}
+                  title="网格视图"
+                  aria-label="网格视图"
+                >
+                  <Grid className="h-3.5 w-3.5" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setViewMode("list")}
+                  className={`rounded p-1 ${
+                    viewMode === "list"
+                      ? "bg-blue-50 text-blue-600"
+                      : "text-gray-500 hover:text-gray-700"
+                  }`}
+                  title="列表视图"
+                  aria-label="列表视图"
+                >
+                  <List className="h-3.5 w-3.5" />
+                </button>
+              </div>
             </div>
 
-            <select
-              value={productId}
-              onChange={(e) => {
-                const nextVal = e.target.value;
-                setProductId(nextVal);
-                const nextParams = new URLSearchParams(searchParams);
-                if (nextVal) nextParams.set("productId", nextVal);
-                else nextParams.delete("productId");
-                setSearchParams(nextParams, { replace: true });
-              }}
-              className="max-w-[160px] rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-xs text-gray-700 focus:border-blue-500 focus:outline-none"
-            >
-              <option value="">全部商品</option>
-              {products.map((p) => (
-                <option key={p.id} value={p.id}>
-                  {p.spu} · {p.nameZh}
-                </option>
-              ))}
-            </select>
-
-            {stores.length > 0 && (
+            <div className="flex flex-wrap items-center gap-1.5">
               <select
-                value={storeId}
-                onChange={(e) => setStoreId(e.target.value)}
-                className="max-w-[150px] rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-xs text-gray-700 focus:border-blue-500 focus:outline-none"
+                value={productId}
+                onChange={(e) => {
+                  const nextVal = e.target.value;
+                  setProductId(nextVal);
+                  const nextParams = new URLSearchParams(searchParams);
+                  if (nextVal) nextParams.set("productId", nextVal);
+                  else nextParams.delete("productId");
+                  setSearchParams(nextParams, { replace: true });
+                }}
+                className="max-w-[132px] rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs text-gray-700 focus:border-blue-500 focus:outline-none"
               >
-                <option value="">全部店铺</option>
-                {stores.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.name} ({s.market})
+                <option value="">全部商品</option>
+                {products.map((p) => (
+                  <option key={p.id} value={p.id}>
+                    {p.spu} · {p.nameZh}
                   </option>
                 ))}
               </select>
-            )}
 
-            <select
-              value={assetType}
-              onChange={(e) => setAssetType(e.target.value as AssetType | "")}
-              className="rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-xs text-gray-700 focus:border-blue-500 focus:outline-none"
-            >
-              <option value="">全部类型</option>
-              <option value="image">图片</option>
-              <option value="video">视频</option>
-              <option value="document">文档</option>
-              <option value="archive">压缩包</option>
-              <option value="other">其他</option>
-            </select>
+              {stores.length > 0 && (
+                <select
+                  value={storeId}
+                  onChange={(e) => setStoreId(e.target.value)}
+                  className="max-w-[122px] rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs text-gray-700 focus:border-blue-500 focus:outline-none"
+                >
+                  <option value="">全部店铺</option>
+                  {stores.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name} ({s.market})
+                    </option>
+                  ))}
+                </select>
+              )}
 
-            <select
-              value={reviewStatus}
-              onChange={(e) => {
-                setQuickView("all");
-                setReviewStatus(e.target.value as ReviewStatus | "");
-              }}
-              className="rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-xs text-gray-700 focus:border-blue-500 focus:outline-none"
-            >
-              <option value="">全部审核态</option>
-              <option value="pending">待审核</option>
-              <option value="approved">已通过</option>
-              <option value="rejected">已拒绝</option>
-            </select>
-
-            <select
-              value={sort}
-              onChange={(e) =>
-                setSort(e.target.value as "newest" | "oldest" | "name_asc" | "size_desc")
-              }
-              className="rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-xs text-gray-700 focus:border-blue-500 focus:outline-none"
-            >
-              <option value="newest">最新上传</option>
-              <option value="oldest">最早上传</option>
-              <option value="name_asc">名称 A-Z</option>
-              <option value="size_desc">体积从大到小</option>
-            </select>
-
-            <div className="flex items-center rounded-lg border border-gray-200 p-0.5">
-              <button
-                type="button"
-                onClick={() => setViewMode("grid")}
-                className={`rounded p-1 ${
-                  viewMode === "grid" ? "bg-blue-50 text-blue-600" : "text-gray-500"
-                }`}
-                title="网格视图"
+              <select
+                value={assetType}
+                onChange={(e) => setAssetType(e.target.value as AssetType | "")}
+                className="rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs text-gray-700 focus:border-blue-500 focus:outline-none"
               >
-                <Grid className="h-3.5 w-3.5" />
-              </button>
-              <button
-                type="button"
-                onClick={() => setViewMode("list")}
-                className={`rounded p-1 ${
-                  viewMode === "list" ? "bg-blue-50 text-blue-600" : "text-gray-500"
-                }`}
-                title="列表视图"
+                <option value="">全部类型</option>
+                <option value="image">图片</option>
+                <option value="video">视频</option>
+                <option value="document">文档</option>
+                <option value="archive">压缩包</option>
+                <option value="other">其他</option>
+              </select>
+
+              <select
+                value={quickView === "pending" ? "pending" : reviewStatus}
+                onChange={(e) => {
+                  const nextReview = e.target.value as ReviewStatus | "";
+                  setQuickView(nextReview === "pending" ? "pending" : "all");
+                  setReviewStatus(nextReview);
+                  const nextParams = new URLSearchParams(searchParams);
+                  if (nextReview) nextParams.set("reviewStatus", nextReview);
+                  else nextParams.delete("reviewStatus");
+                  setSearchParams(nextParams, { replace: true });
+                }}
+                className="rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs text-gray-700 focus:border-blue-500 focus:outline-none"
               >
-                <List className="h-3.5 w-3.5" />
-              </button>
+                <option value="">全部审核态</option>
+                <option value="pending">待审核</option>
+                <option value="approved">已通过</option>
+                <option value="rejected">已拒绝</option>
+              </select>
+
+              {hasActiveFilters && (
+                <button
+                  type="button"
+                  onClick={resetAllFilters}
+                  className="ml-auto inline-flex items-center gap-1 rounded-lg border border-gray-200 bg-gray-50 px-2 py-1 text-[11px] font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-900"
+                >
+                  <RotateCcw className="h-3 w-3" />
+                  <span>重置筛选</span>
+                </button>
+              )}
             </div>
           </div>
 
@@ -1442,8 +1590,14 @@ export function AssetsPage() {
           </div>
         </div>
 
-        {/* Right Inspector Panel */}
-        <aside className="hidden w-80 shrink-0 flex-col border-l border-gray-200 bg-white xl:flex">
+        {/* Right Inspector Panel (desktop docked + <xl slide-over drawer) */}
+        <aside
+          className={
+            activeAssetId
+              ? "fixed inset-y-0 right-0 z-40 flex w-full max-w-sm flex-col border-l border-gray-200 bg-white shadow-2xl xl:static xl:z-auto xl:w-80 xl:max-w-none xl:shrink-0 xl:shadow-none"
+              : "hidden w-80 shrink-0 flex-col border-l border-gray-200 bg-white xl:flex"
+          }
+        >
           {!activeAssetId ? (
             <div className="flex flex-1 flex-col items-center justify-center p-6 text-center text-xs text-gray-400">
               <Tag className="h-8 w-8 text-gray-300" />
@@ -1455,8 +1609,8 @@ export function AssetsPage() {
               正在加载素材详情...
             </div>
           ) : activeAsset ? (
-            <div className="flex-1 space-y-4 overflow-y-auto p-4 text-xs">
-              <div className="flex items-center justify-between">
+            <div className="flex h-full min-h-0 flex-col text-xs">
+              <div className="flex shrink-0 items-center justify-between border-b border-gray-100 px-4 py-3">
                 <span className="font-semibold text-gray-900">素材详情</span>
                 <button
                   type="button"
@@ -1464,12 +1618,14 @@ export function AssetsPage() {
                     setActiveAssetId(null);
                     setActiveAsset(null);
                   }}
+                  aria-label="关闭素材详情"
                   className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
                 >
                   <X className="h-3.5 w-3.5" />
                 </button>
               </div>
 
+              <div className="flex-1 space-y-4 overflow-y-auto p-4">
               <div
                 className="relative aspect-[4/3] w-full cursor-pointer overflow-hidden rounded-lg border border-gray-200 bg-gray-100"
                 onClick={() => {
@@ -1679,13 +1835,13 @@ export function AssetsPage() {
                           <p className="mt-0.5 text-gray-500">审核意见：{ver.reviewNote}</p>
                         )}
 
-                        <div className="mt-1.5 flex flex-wrap items-center gap-2 border-t border-gray-200/70 pt-1.5">
+                        <div className="mt-2 flex flex-wrap items-center gap-1.5 border-t border-gray-200/70 pt-2">
                           {!isCurrent && (
                             <button
                               type="button"
                               disabled={busy}
                               onClick={() => void handleSwitchVersion(ver.id, ver.versionNo)}
-                              className="font-medium text-blue-600 hover:text-blue-700 disabled:opacity-50"
+                              className="rounded border border-blue-200 bg-white px-2 py-0.5 text-[11px] font-medium text-blue-600 transition-colors hover:bg-blue-50 disabled:opacity-50"
                             >
                               设为当前
                             </button>
@@ -1700,13 +1856,13 @@ export function AssetsPage() {
                                 setVersionReviewNote(ver.reviewNote || "");
                               }
                             }}
-                            className="font-medium text-gray-700 hover:text-blue-600"
+                            className="rounded border border-gray-200 bg-white px-2 py-0.5 text-[11px] font-medium text-gray-700 transition-colors hover:bg-gray-100"
                           >
                             {isReviewOpen ? "取消审核" : "独立审核"}
                           </button>
                           <a
                             href={api.contentUrl(activeAsset.id, ver.id)}
-                            className="ml-auto text-gray-500 hover:text-gray-800"
+                            className="ml-auto rounded border border-gray-200 bg-white px-2 py-0.5 text-[11px] font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-900"
                           >
                             下载
                           </a>
@@ -1880,29 +2036,41 @@ export function AssetsPage() {
                   </div>
                 </div>
 
-                <div className="flex items-center gap-2 pt-1">
-                  <button
-                    type="button"
-                    disabled={savingInspector}
-                    onClick={() => void handleSaveInspector()}
-                    className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-                  >
-                    <Save className="h-3.5 w-3.5" />
-                    <span>{savingInspector ? "保存中..." : "保存元数据"}</span>
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => void handleSoftDeleteSingle(activeAsset)}
-                    className="rounded-lg border border-rose-200 p-2 text-rose-600 hover:bg-rose-50"
-                    title="移入回收站"
-                  >
-                    <Trash2 className="h-3.5 w-3.5" />
-                  </button>
-                </div>
+              </div>
+              </div>
+
+              <div className="flex shrink-0 items-center gap-2 border-t border-gray-200 bg-white px-4 py-3">
+                <button
+                  type="button"
+                  disabled={savingInspector}
+                  onClick={() => void handleSaveInspector()}
+                  className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg bg-blue-600 px-3 py-2 font-medium text-white transition-colors hover:bg-blue-700 disabled:opacity-50"
+                >
+                  <Save className="h-3.5 w-3.5" />
+                  <span>{savingInspector ? "保存中..." : "保存元数据"}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => handleSoftDeleteSingle(activeAsset)}
+                  className="rounded-lg border border-rose-200 p-2 text-rose-600 transition-colors hover:bg-rose-50"
+                  title="移入回收站"
+                  aria-label="移入回收站"
+                >
+                  <Trash2 className="h-3.5 w-3.5" />
+                </button>
               </div>
             </div>
           ) : null}
         </aside>
+        {activeAssetId && (
+          <div
+            className="fixed inset-0 z-30 bg-gray-900/35 backdrop-blur-[1px] xl:hidden"
+            onClick={() => {
+              setActiveAssetId(null);
+              setActiveAsset(null);
+            }}
+          />
+        )}
       </div>
 
       {/* Upload Modal */}
@@ -2063,6 +2231,12 @@ export function AssetsPage() {
           onClose={() => setLightboxIndex(null)}
         />
       )}
+
+      <ConfirmDialog
+        dialog={confirmDialog}
+        busy={confirmBusy}
+        onClose={() => setConfirmDialog(null)}
+      />
     </div>
   );
 }
