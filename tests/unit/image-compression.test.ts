@@ -1,5 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { compressImageForUpload } from "../../src/web/utils/imageCompression";
+import {
+  compressImageForUpload,
+  isCompressibleImageFile
+} from "../../src/web/utils/imageCompression";
 
 function mockWorker(result?: Blob | null) {
   const worker = {
@@ -74,5 +77,59 @@ describe("compressImageForUpload", () => {
     ];
     for (const file of files) expect(await compressImageForUpload(file)).toBe(file);
     expect(createWorker).not.toHaveBeenCalled();
+  });
+
+  it("returns original immediately without spawning a worker when signal is already aborted", async () => {
+    const { createWorker } = mockWorker(new Blob([new Uint8Array(512)], { type: "image/png" }));
+    const controller = new AbortController();
+    controller.abort();
+    const file = pngFile();
+
+    expect(await compressImageForUpload(file, { signal: controller.signal })).toBe(file);
+    expect(createWorker).not.toHaveBeenCalled();
+  });
+
+  it("immediately terminates the worker and returns original when aborted in flight", async () => {
+    vi.useFakeTimers();
+    const { worker } = mockWorker();
+    const controller = new AbortController();
+    const file = pngFile();
+
+    const upload = compressImageForUpload(file, { signal: controller.signal });
+    expect(worker.postMessage).toHaveBeenCalledWith(file);
+    expect(worker.terminate).not.toHaveBeenCalled();
+
+    controller.abort();
+    expect(worker.terminate).toHaveBeenCalledOnce();
+    expect(await upload).toBe(file);
+
+    // Ensure cleared timer does not terminate again or throw later
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(worker.terminate).toHaveBeenCalledOnce();
+  });
+});
+
+describe("isCompressibleImageFile", () => {
+  it("accepts PNG and JPEG files with matching extension within byte budget", () => {
+    expect(isCompressibleImageFile(pngFile())).toBe(true);
+    expect(
+      isCompressibleImageFile(new File([new Uint8Array(64)], "photo.jpeg", { type: "image/jpeg" }))
+    ).toBe(true);
+    expect(
+      isCompressibleImageFile(new File([new Uint8Array(64)], "PHOTO.JPG", { type: "image/jpeg" }))
+    ).toBe(true);
+  });
+
+  it("rejects non-PNG/JPEG formats, mismatched extensions, empty files, and oversized files", () => {
+    expect(isCompressibleImageFile(new File(["gif"], "a.gif", { type: "image/gif" }))).toBe(false);
+    expect(isCompressibleImageFile(new File(["pdf"], "a.pdf", { type: "application/pdf" }))).toBe(false);
+    expect(isCompressibleImageFile(new File(["mp4"], "a.mp4", { type: "video/mp4" }))).toBe(false);
+    expect(isCompressibleImageFile(new File(["png"], "a.jpg", { type: "image/png" }))).toBe(false);
+    expect(isCompressibleImageFile(new File([], "empty.png", { type: "image/png" }))).toBe(false);
+    expect(
+      isCompressibleImageFile(
+        new File([new Uint8Array(32 * 1024 * 1024 + 1)], "huge.png", { type: "image/png" })
+      )
+    ).toBe(false);
   });
 });

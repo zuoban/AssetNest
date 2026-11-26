@@ -33,11 +33,21 @@ import type {
   SkuStatus,
   StoreRecord
 } from "../../shared/types";
-import { api, ApiClientError } from "../api/client";
+import {
+  api,
+  ApiClientError,
+  type UploadTransferProgress
+} from "../api/client";
 import { AssetLightbox } from "../components/AssetLightbox";
 import { ConfirmDialog, type ConfirmDialogState } from "../components/ConfirmDialog";
 import { FileDropButton } from "../components/FileDropButton";
 import { ImageCompressionSwitch } from "../components/ImageCompressionSwitch";
+import {
+  CompressionProgressPanel,
+  PreparedUploadList,
+  UploadTransferProgressPanel
+} from "../components/UploadProgressBar";
+import { usePreparedUploadFiles } from "../hooks/usePreparedUploadFiles";
 import {
   formatAspectRatio,
   formatBytes,
@@ -108,6 +118,8 @@ export function ProductDetailPage() {
   // Asset upload & lightbox
   const [uploading, setUploading] = useState(false);
   const [compressUploadImages, setCompressUploadImages] = useState(true);
+  const uploadPrep = usePreparedUploadFiles(compressUploadImages);
+  const [uploadProgress, setUploadProgress] = useState<UploadTransferProgress | null>(null);
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
 
   // Master image lock / unlock modals
@@ -202,6 +214,11 @@ export function ProductDetailPage() {
   useEffect(() => {
     void loadAll();
   }, [loadAll]);
+
+  useEffect(() => {
+    uploadPrep.clear();
+    setUploadProgress(null);
+  }, [id, uploadPrep.clear]);
 
   useEffect(() => {
     if (!compareOpen || !compareAssetId) {
@@ -383,25 +400,50 @@ export function ProductDetailPage() {
     });
   };
 
-  const handleUploadLinkedAssets = async (files: File[]) => {
-    if (!id || files.length === 0 || uploadInFlight.current) return;
+  const handleUploadLinkedAssets = async () => {
+    if (
+      !id ||
+      uploadPrep.items.length === 0 ||
+      uploadPrep.summary.isCompressing ||
+      uploadInFlight.current
+    ) {
+      return;
+    }
     uploadInFlight.current = true;
     setUploading(true);
+    const totalBytes = uploadPrep.preparedFiles.reduce((sum, item) => sum + item.upload.size, 0);
+    setUploadProgress({
+      loaded: 0,
+      total: totalBytes,
+      percent: 0,
+      phase: "uploading"
+    });
     setError(null);
     setNotice(null);
     try {
-      const res = await api.uploadAssets(files, { productId: id, compressImages: compressUploadImages });
+      const res = await api.uploadAssets(
+        uploadPrep.items.map((item) => item.originalFile),
+        {
+          productId: id,
+          compressImages: compressUploadImages,
+          preparedFiles: uploadPrep.preparedFiles,
+          compressionSummary: uploadPrep.summary.compressionSummary,
+          onUploadProgress: (progress) => setUploadProgress(progress)
+        }
+      );
       setNotice(
         `已上传 ${res.uploadedCount} 个素材${
           res.deduplicatedCount > 0 ? `（其中 ${res.deduplicatedCount} 个复用已有底层文件）` : ""
         }${formatUploadCompression(res.compression)}`
       );
+      uploadPrep.clear();
       await loadAll();
     } catch (err) {
       setError(err instanceof ApiClientError ? err.message : "上传素材失败");
     } finally {
       uploadInFlight.current = false;
       setUploading(false);
+      setUploadProgress(null);
     }
   };
 
@@ -1092,7 +1134,7 @@ export function ProductDetailPage() {
             </div>
           </div>
 
-          <div className="space-y-2">
+          <div className="space-y-2.5 rounded-xl border border-gray-200 bg-white p-4 text-xs">
             <ImageCompressionSwitch
               checked={compressUploadImages}
               onChange={setCompressUploadImages}
@@ -1101,12 +1143,76 @@ export function ProductDetailPage() {
             <FileDropButton
               multiple
               disabled={uploading}
-              onFiles={(files) => void handleUploadLinkedAssets(files)}
-              className="flex flex-col items-center justify-center gap-1.5 px-4 py-5 text-sm font-medium"
+              onFiles={(files) => {
+                if (uploadInFlight.current) return;
+                uploadPrep.addFiles(files);
+                setError(null);
+              }}
+              className="flex flex-col items-center justify-center px-4 py-6"
             >
-              <Upload className="h-5 w-5 text-blue-600" />
-              <span>{uploading ? "正在上传素材…" : "拖入文件或点击选择，上传到此商品"}</span>
+              <Upload className="h-6 w-6 text-gray-400" />
+              <span className="mt-1.5 font-medium text-gray-700">拖入文件，或点击选择</span>
+              <span className="mt-0.5 text-[11px] text-gray-400">
+                支持多文件批量加入待上传队列，相同底层文件自动基于 SHA-256 去重
+              </span>
             </FileDropButton>
+            {compressUploadImages && uploadPrep.summary.compressibleCount > 0 && (
+              <CompressionProgressPanel
+                completed={uploadPrep.summary.completedCount}
+                total={uploadPrep.summary.compressibleCount}
+                percent={uploadPrep.summary.percent}
+                isCompressing={uploadPrep.summary.isCompressing}
+                originalBytes={uploadPrep.summary.originalBytes}
+                compressedBytes={uploadPrep.summary.compressedBytes}
+                savedBytes={uploadPrep.summary.savedBytes}
+                savedPercent={uploadPrep.summary.savedPercent}
+                unchangedImages={uploadPrep.summary.unchangedImages}
+              />
+            )}
+            <PreparedUploadList
+              items={uploadPrep.items}
+              compressEnabled={compressUploadImages}
+              disabled={uploading}
+              onRemove={uploadPrep.removeFile}
+            />
+            {uploading && uploadProgress && (
+              <UploadTransferProgressPanel
+                progress={uploadProgress}
+                label="正在上传素材…"
+              />
+            )}
+            {uploadPrep.items.length > 0 && (
+              <div className="flex items-center justify-end gap-2 border-t border-gray-100 pt-3">
+                <button
+                  type="button"
+                  disabled={uploading}
+                  onClick={uploadPrep.clear}
+                  className="rounded-lg border border-gray-200 px-3.5 py-2 font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
+                >
+                  清空队列
+                </button>
+                <button
+                  type="button"
+                  disabled={
+                    uploading ||
+                    uploadPrep.items.length === 0 ||
+                    uploadPrep.summary.isCompressing
+                  }
+                  onClick={() => void handleUploadLinkedAssets()}
+                  className="rounded-lg bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+                >
+                  {uploadPrep.summary.isCompressing
+                    ? `正在压缩 (${uploadPrep.summary.completedCount}/${uploadPrep.summary.compressibleCount})…`
+                    : uploading
+                      ? uploadProgress?.phase === "processing"
+                        ? "服务器处理中…"
+                        : uploadProgress
+                          ? `上传中 ${uploadProgress.percent}%`
+                          : "上传中..."
+                      : `开始上传 (${uploadPrep.items.length})`}
+                </button>
+              </div>
+            )}
           </div>
 
           {/* Locked Master Images Panel */}

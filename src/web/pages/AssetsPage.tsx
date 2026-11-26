@@ -43,12 +43,26 @@ import type {
   TagDimension,
   TagRecord
 } from "../../shared/types";
-import { api, ApiClientError } from "../api/client";
+import {
+  api,
+  ApiClientError,
+  type CompressionBatchProgress,
+  type ImageUploadSizes,
+  type PreparedUploadFile,
+  type UploadTransferProgress
+} from "../api/client";
 import { AssetLightbox } from "../components/AssetLightbox";
 import { ConfirmDialog, type ConfirmDialogState } from "../components/ConfirmDialog";
 import { FileDropButton, useFileDrop } from "../components/FileDropButton";
 import { ImageCompressionSwitch } from "../components/ImageCompressionSwitch";
 import { StorageStatusBadge } from "../components/StatusBadge";
+import {
+  CompressionProgressPanel,
+  formatPreparedItemStatus,
+  PreparedUploadList,
+  UploadTransferProgressPanel
+} from "../components/UploadProgressBar";
+import { usePreparedUploadFiles } from "../hooks/usePreparedUploadFiles";
 import {
   ASSET_PURPOSES,
   formatBytes,
@@ -139,13 +153,16 @@ export function AssetsPage() {
 
   // Version upload & independent per-version review
   const [versionFormOpen, setVersionFormOpen] = useState(false);
-  const [versionFile, setVersionFile] = useState<File | null>(null);
   const [versionFileError, setVersionFileError] = useState<string | null>(null);
   const [versionChangeNote, setVersionChangeNote] = useState("");
   const [versionPromptText, setVersionPromptText] = useState("");
   const [versionSetCurrent, setVersionSetCurrent] = useState(true);
   const [compressVersionImage, setCompressVersionImage] = useState(true);
   const [versionUploading, setVersionUploading] = useState(false);
+  const [versionUploadProgress, setVersionUploadProgress] = useState<UploadTransferProgress | null>(
+    null
+  );
+  const versionUploadPrep = usePreparedUploadFiles(compressVersionImage);
   const [versionActionBusyId, setVersionActionBusyId] = useState<string | null>(null);
   const [reviewingVersionId, setReviewingVersionId] = useState<string | null>(null);
   const [versionReviewNote, setVersionReviewNote] = useState("");
@@ -160,7 +177,15 @@ export function AssetsPage() {
   const [uploadTargetFolderId, setUploadTargetFolderId] = useState("");
   const [uploadTargetPurpose, setUploadTargetPurpose] = useState("raw");
   const [uploadTargetStorageId, setUploadTargetStorageId] = useState("");
-  const [uploadPendingFiles, setUploadPendingFiles] = useState<File[]>([]);
+  const [modalUploadProgress, setModalUploadProgress] = useState<UploadTransferProgress | null>(
+    null
+  );
+  const [canvasCompressionProgress, setCanvasCompressionProgress] =
+    useState<CompressionBatchProgress | null>(null);
+  const [canvasUploadProgress, setCanvasUploadProgress] = useState<UploadTransferProgress | null>(
+    null
+  );
+  const modalUploadPrep = usePreparedUploadFiles(compressUploadImages);
 
   // Inline folder/tag creation
   const [newFolderName, setNewFolderName] = useState("");
@@ -298,17 +323,19 @@ export function AssetsPage() {
   useEffect(() => {
     if (!activeAssetId) {
       setActiveAsset(null);
+      versionUploadPrep.clear();
       return;
     }
     setVersionFormOpen(false);
-    setVersionFile(null);
+    versionUploadPrep.clear();
     setVersionFileError(null);
+    setVersionUploadProgress(null);
     setVersionChangeNote("");
     setVersionPromptText("");
     setVersionSetCurrent(true);
     setReviewingVersionId(null);
     void loadActiveAsset(activeAssetId);
-  }, [activeAssetId, loadActiveAsset]);
+  }, [activeAssetId, loadActiveAsset, versionUploadPrep.clear]);
 
   useEffect(() => {
     if (!activeAssetId || lightboxIndex !== null || confirmDialog || uploadModalOpen) return;
@@ -417,9 +444,38 @@ export function AssetsPage() {
     }
   };
 
+  const closeUploadModal = () => {
+    if (uploading) return;
+    modalUploadPrep.clear();
+    setModalUploadProgress(null);
+    setUploadModalError(null);
+    setUploadModalOpen(false);
+  };
+
+  const toggleVersionForm = () => {
+    if (versionUploading) return;
+    setVersionFormOpen((prev) => {
+      const next = !prev;
+      if (!next) {
+        versionUploadPrep.clear();
+        setVersionFileError(null);
+        setVersionUploadProgress(null);
+      }
+      return next;
+    });
+  };
+
   const performUpload = async (
     files: File[],
-    opts: { productId?: string; folderId?: string; purpose?: string; storageId?: string }
+    opts: {
+      source: "modal" | "canvas";
+      productId?: string;
+      folderId?: string;
+      purpose?: string;
+      storageId?: string;
+      preparedFiles?: PreparedUploadFile[];
+      compressionSummary?: ImageUploadSizes | null;
+    }
   ) => {
     if (files.length === 0 || uploadInFlight.current) return;
     uploadInFlight.current = true;
@@ -427,9 +483,33 @@ export function AssetsPage() {
     setUploadModalError(null);
     setError(null);
     setNotice(null);
+    if (opts.source === "modal") {
+      const total = (opts.preparedFiles ?? []).reduce((sum, item) => sum + item.upload.size, 0);
+      setModalUploadProgress({ loaded: 0, total, percent: 0, phase: "uploading" });
+    } else {
+      setCanvasCompressionProgress(null);
+      setCanvasUploadProgress(
+        compressUploadImages
+          ? null
+          : {
+              loaded: 0,
+              total: files.reduce((sum, f) => sum + f.size, 0),
+              percent: 0,
+              phase: "uploading"
+            }
+      );
+    }
     try {
       const res = await api.uploadAssets(files, {
         compressImages: compressUploadImages,
+        preparedFiles: opts.preparedFiles,
+        compressionSummary: opts.compressionSummary,
+        onCompressionProgress:
+          opts.source === "canvas" ? (progress) => setCanvasCompressionProgress(progress) : undefined,
+        onUploadProgress:
+          opts.source === "modal"
+            ? (progress) => setModalUploadProgress(progress)
+            : (progress) => setCanvasUploadProgress(progress),
         productId: opts.productId || undefined,
         folderId: opts.folderId || undefined,
         purpose: opts.purpose || undefined,
@@ -440,24 +520,30 @@ export function AssetsPage() {
           res.deduplicatedCount > 0 ? `（${res.deduplicatedCount} 个命中内容去重）` : ""
         }${formatUploadCompression(res.compression)}`
       );
-      setUploadModalOpen(false);
-      setUploadPendingFiles([]);
+      if (opts.source === "modal") {
+        setUploadModalOpen(false);
+        modalUploadPrep.clear();
+      }
       await Promise.all([loadAssets(), loadTaxonomy()]);
       if (res.items[0]) {
         setActiveAssetId(res.items[0].id);
       }
     } catch (err) {
       const message = err instanceof ApiClientError ? err.message : "上传失败";
-      if (uploadModalOpen) setUploadModalError(message);
+      if (opts.source === "modal") setUploadModalError(message);
       else setError(message);
     } finally {
       uploadInFlight.current = false;
       setUploading(false);
+      setModalUploadProgress(null);
+      setCanvasCompressionProgress(null);
+      setCanvasUploadProgress(null);
     }
   };
 
   const { draggingOver, dropProps: workspaceDropProps } = useFileDrop((files) => {
     void performUpload(files, {
+      source: "canvas",
       productId: productId || undefined,
       folderId: folderId || undefined,
       storageId: storageId || undefined
@@ -557,21 +643,39 @@ export function AssetsPage() {
   };
 
   const handleAppendVersion = async () => {
-    if (!activeAsset || !versionFile || versionFileError || versionUploadInFlight.current) return;
+    const versionItem = versionUploadPrep.items[0];
+    if (
+      !activeAsset ||
+      !versionItem ||
+      versionFileError ||
+      versionUploadPrep.summary.isCompressing ||
+      versionUploadInFlight.current
+    ) {
+      return;
+    }
     versionUploadInFlight.current = true;
     setVersionUploading(true);
+    setVersionUploadProgress({
+      loaded: 0,
+      total: versionItem.uploadFile.size,
+      percent: 0,
+      phase: "uploading"
+    });
     setError(null);
     setNotice(null);
     try {
-      const res = await api.appendAssetVersion(activeAsset.id, versionFile, {
+      const res = await api.appendAssetVersion(activeAsset.id, versionItem.originalFile, {
         compressImages: compressVersionImage,
+        preparedFiles: [{ original: versionItem.originalFile, upload: versionItem.uploadFile }],
+        compressionSummary: versionUploadPrep.summary.compressionSummary,
+        onUploadProgress: (progress) => setVersionUploadProgress(progress),
         changeNote: versionChangeNote.trim() || undefined,
         promptText: versionPromptText.trim() || undefined,
         setAsCurrent: versionSetCurrent
       });
       setActiveAsset(res.asset);
       syncInspectorFields(res.asset);
-      setVersionFile(null);
+      versionUploadPrep.clear();
       setVersionChangeNote("");
       setVersionPromptText("");
       setVersionFormOpen(false);
@@ -586,6 +690,7 @@ export function AssetsPage() {
     } finally {
       versionUploadInFlight.current = false;
       setVersionUploading(false);
+      setVersionUploadProgress(null);
     }
   };
 
@@ -807,7 +912,8 @@ export function AssetsPage() {
               setUploadTargetProductId(productId);
               setUploadTargetFolderId(folderId);
               setUploadTargetStorageId(storageId);
-              setUploadPendingFiles([]);
+              modalUploadPrep.clear();
+              setModalUploadProgress(null);
               setUploadModalError(null);
               setUploadModalOpen(true);
             }}
@@ -841,6 +947,33 @@ export function AssetsPage() {
           </button>
         </div>
       )}
+      {!uploadModalOpen && canvasUploadProgress ? (
+        <UploadTransferProgressPanel
+          progress={canvasUploadProgress}
+          label="正在上传素材…"
+          compressionSummary={
+            canvasCompressionProgress && canvasCompressionProgress.total > 0
+              ? {
+                  originalBytes: canvasCompressionProgress.originalBytes,
+                  uploadedBytes: canvasCompressionProgress.compressedBytes,
+                  unchangedImages: canvasCompressionProgress.unchangedImages
+                }
+              : null
+          }
+        />
+      ) : !uploadModalOpen && canvasCompressionProgress ? (
+        <CompressionProgressPanel
+          completed={canvasCompressionProgress.completed}
+          total={canvasCompressionProgress.total}
+          percent={canvasCompressionProgress.percent}
+          isCompressing={canvasCompressionProgress.completed < canvasCompressionProgress.total}
+          originalBytes={canvasCompressionProgress.originalBytes}
+          compressedBytes={canvasCompressionProgress.compressedBytes}
+          savedBytes={canvasCompressionProgress.savedBytes}
+          savedPercent={canvasCompressionProgress.savedPercent}
+          unchangedImages={canvasCompressionProgress.unchangedImages}
+        />
+      ) : null}
 
       <div className="flex h-[calc(100vh-11.5rem)] min-h-[560px] overflow-hidden rounded-xl border border-gray-200 bg-white">
         {/* Left Taxonomy Rail */}
@@ -1738,7 +1871,7 @@ export function AssetsPage() {
                   <button
                     type="button"
                     disabled={versionUploading}
-                    onClick={() => setVersionFormOpen((prev) => !prev)}
+                    onClick={toggleVersionForm}
                     className="inline-flex items-center gap-1 rounded border border-blue-200 bg-blue-50 px-2 py-0.5 text-[11px] font-medium text-blue-700 hover:bg-blue-100"
                   >
                     <Upload className="h-3 w-3" />
@@ -1746,74 +1879,135 @@ export function AssetsPage() {
                   </button>
                 </div>
 
-                {versionFormOpen && (
-                  <div className="space-y-2 rounded-lg border border-blue-100 bg-blue-50/40 p-2.5 text-[11px]">
-                    <p className="text-gray-600">
-                      追加为 V{activeAsset.versions.length + 1}，不覆盖旧版本与已锁定的商品母图。
-                    </p>
-                    <ImageCompressionSwitch
-                      checked={compressVersionImage}
-                      onChange={setCompressVersionImage}
-                      disabled={versionUploading}
-                    />
-                    <FileDropButton
-                      disabled={versionUploading}
-                      onFiles={(files) => {
-                        if (versionUploadInFlight.current) return;
-                        if (files.length > 1) {
-                          setVersionFileError("每次只能上传一个版本文件，请重新选择或拖入单个文件。");
-                          return;
-                        }
-                        setVersionFile(files[0] ?? null);
-                        setVersionFileError(null);
-                      }}
-                      className="flex items-center justify-center gap-1.5 px-2 py-2 font-medium"
-                    >
-                      <Upload className="h-3.5 w-3.5" />
-                      <span>拖入单个文件，或点击选择</span>
-                    </FileDropButton>
-                    {versionFile && (
-                      <p className="break-all text-gray-700">已选择：{versionFile.name}</p>
-                    )}
-                    {versionFileError && (
-                      <p role="alert" className="text-rose-700">{versionFileError}</p>
-                    )}
-                    <input
-                      type="text"
-                      disabled={versionUploading}
-                      value={versionChangeNote}
-                      onChange={(e) => setVersionChangeNote(e.target.value)}
-                      placeholder="变更说明（如：调整高光、修复文字）"
-                      className="w-full rounded border border-gray-200 bg-white px-2 py-1 focus:border-blue-500 focus:outline-none"
-                    />
-                    <textarea
-                      rows={2}
-                      disabled={versionUploading}
-                      value={versionPromptText}
-                      onChange={(e) => setVersionPromptText(e.target.value)}
-                      placeholder="提示词 / 生成参数（可选）"
-                      className="w-full rounded border border-gray-200 bg-white px-2 py-1 focus:border-blue-500 focus:outline-none"
-                    />
-                    <label className="flex cursor-pointer items-center gap-1.5 text-gray-700">
-                      <input
-                        type="checkbox"
+                {versionFormOpen && (() => {
+                  const versionItem = versionUploadPrep.items[0] ?? null;
+                  const versionStatus = versionItem
+                    ? formatPreparedItemStatus(versionItem, compressVersionImage)
+                    : null;
+                  return (
+                    <div className="space-y-2 rounded-lg border border-blue-100 bg-blue-50/40 p-2.5 text-[11px]">
+                      <p className="text-gray-600">
+                        追加为 V{activeAsset.versions.length + 1}，不覆盖旧版本与已锁定的商品母图。
+                      </p>
+                      <ImageCompressionSwitch
+                        checked={compressVersionImage}
+                        onChange={setCompressVersionImage}
                         disabled={versionUploading}
-                        checked={versionSetCurrent}
-                        onChange={(e) => setVersionSetCurrent(e.target.checked)}
-                        className="rounded border-gray-300"
                       />
-                      <span>上传后设为当前展示版本</span>
-                    </label>
-                    <button
-                      type="button"
-                      disabled={!versionFile || !!versionFileError || versionUploading}
-                      onClick={() => void handleAppendVersion()}
-                      className="w-full rounded-lg bg-blue-600 px-2.5 py-1.5 font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-                    >
-                      {versionUploading ? "正在上传新版本..." : "提交新版本"}
-                    </button>
-                  </div>
-                )}
+                      <FileDropButton
+                        disabled={versionUploading}
+                        onFiles={(files) => {
+                          if (versionUploadInFlight.current) return;
+                          if (files.length > 1) {
+                            setVersionFileError("每次只能上传一个版本文件，请重新选择或拖入单个文件。");
+                            return;
+                          }
+                          versionUploadPrep.setFiles(files[0] ? [files[0]] : []);
+                          setVersionFileError(null);
+                        }}
+                        className="flex items-center justify-center gap-1.5 px-2 py-2 font-medium"
+                      >
+                        <Upload className="h-3.5 w-3.5" />
+                        <span>拖入单个文件，或点击选择</span>
+                      </FileDropButton>
+                      {versionItem && versionStatus && (
+                        <div className="space-y-1.5 rounded-lg border border-gray-200 bg-white p-2">
+                          <div className="flex items-start justify-between gap-2">
+                            <div className="min-w-0 flex-1">
+                              <p className="truncate font-medium text-gray-800">
+                                {versionItem.originalFile.name}
+                              </p>
+                              <p className={`font-mono-tabular mt-0.5 ${versionStatus.toneClass}`}>
+                                {versionStatus.text}
+                              </p>
+                            </div>
+                            {!versionUploading && (
+                              <button
+                                type="button"
+                                aria-label={`移除 ${versionItem.originalFile.name}`}
+                                onClick={() => versionUploadPrep.clear()}
+                                className="rounded p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+                              >
+                                <X className="h-3.5 w-3.5" />
+                              </button>
+                            )}
+                          </div>
+                          {compressVersionImage && versionUploadPrep.summary.isCompressing && (
+                            <CompressionProgressPanel
+                              compact
+                              completed={versionUploadPrep.summary.completedCount}
+                              total={versionUploadPrep.summary.compressibleCount}
+                              percent={versionUploadPrep.summary.percent}
+                              isCompressing={versionUploadPrep.summary.isCompressing}
+                              originalBytes={versionUploadPrep.summary.originalBytes}
+                              compressedBytes={versionUploadPrep.summary.compressedBytes}
+                              savedBytes={versionUploadPrep.summary.savedBytes}
+                              savedPercent={versionUploadPrep.summary.savedPercent}
+                              unchangedImages={versionUploadPrep.summary.unchangedImages}
+                            />
+                          )}
+                        </div>
+                      )}
+                      {versionFileError && (
+                        <p role="alert" className="text-rose-700">{versionFileError}</p>
+                      )}
+                      {versionUploading && versionUploadProgress && (
+                        <UploadTransferProgressPanel
+                          compact
+                          progress={versionUploadProgress}
+                          label="正在上传新版本…"
+                        />
+                      )}
+                      <input
+                        type="text"
+                        disabled={versionUploading}
+                        value={versionChangeNote}
+                        onChange={(e) => setVersionChangeNote(e.target.value)}
+                        placeholder="变更说明（如：调整高光、修复文字）"
+                        className="w-full rounded border border-gray-200 bg-white px-2 py-1 focus:border-blue-500 focus:outline-none"
+                      />
+                      <textarea
+                        rows={2}
+                        disabled={versionUploading}
+                        value={versionPromptText}
+                        onChange={(e) => setVersionPromptText(e.target.value)}
+                        placeholder="提示词 / 生成参数（可选）"
+                        className="w-full rounded border border-gray-200 bg-white px-2 py-1 focus:border-blue-500 focus:outline-none"
+                      />
+                      <label className="flex cursor-pointer items-center gap-1.5 text-gray-700">
+                        <input
+                          type="checkbox"
+                          disabled={versionUploading}
+                          checked={versionSetCurrent}
+                          onChange={(e) => setVersionSetCurrent(e.target.checked)}
+                          className="rounded border-gray-300"
+                        />
+                        <span>上传后设为当前展示版本</span>
+                      </label>
+                      <button
+                        type="button"
+                        disabled={
+                          !versionItem ||
+                          !!versionFileError ||
+                          versionUploading ||
+                          versionUploadPrep.summary.isCompressing
+                        }
+                        onClick={() => void handleAppendVersion()}
+                        className="w-full rounded-lg bg-blue-600 px-2.5 py-1.5 font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+                      >
+                        {versionUploadPrep.summary.isCompressing
+                          ? "正在压缩图片…"
+                          : versionUploading
+                            ? versionUploadProgress?.phase === "processing"
+                              ? "服务器处理中…"
+                              : versionUploadProgress
+                                ? `上传新版本 ${versionUploadProgress.percent}%`
+                                : "正在上传新版本..."
+                            : "提交新版本"}
+                      </button>
+                    </div>
+                  );
+                })()}
 
                 <div className="max-h-64 space-y-2 overflow-y-auto pr-0.5">
                   {activeAsset.versions.map((ver) => {
@@ -2117,7 +2311,7 @@ export function AssetsPage() {
               <button
                 type="button"
                 disabled={uploading}
-                onClick={() => setUploadModalOpen(false)}
+                onClick={closeUploadModal}
                 className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
               >
                 <X className="h-4 w-4" />
@@ -2204,7 +2398,7 @@ export function AssetsPage() {
                   disabled={uploading}
                   onFiles={(files) => {
                     if (uploadInFlight.current) return;
-                    setUploadPendingFiles(files);
+                    modalUploadPrep.addFiles(files);
                     setUploadModalError(null);
                   }}
                   className="flex flex-col items-center justify-center px-4 py-6"
@@ -2218,48 +2412,84 @@ export function AssetsPage() {
                 {uploadModalError && (
                   <p role="alert" className="mt-2 text-rose-700">{uploadModalError}</p>
                 )}
-                {uploadPendingFiles.length > 0 && (
-                  <div className="mt-2 max-h-32 space-y-1 overflow-y-auto rounded-lg border border-gray-200 p-2">
-                    {uploadPendingFiles.map((file, idx) => (
-                      <div
-                        key={`${file.name}-${idx}`}
-                        className="flex items-center justify-between gap-2 text-[11px]"
-                      >
-                        <span className="truncate text-gray-800">{file.name}</span>
-                        <span className="font-mono-tabular shrink-0 text-gray-500">
-                          原始大小 {formatBytes(file.size)}
-                        </span>
-                      </div>
-                    ))}
-                  </div>
+                {compressUploadImages && modalUploadPrep.summary.compressibleCount > 0 && (
+                  <CompressionProgressPanel
+                    completed={modalUploadPrep.summary.completedCount}
+                    total={modalUploadPrep.summary.compressibleCount}
+                    percent={modalUploadPrep.summary.percent}
+                    isCompressing={modalUploadPrep.summary.isCompressing}
+                    originalBytes={modalUploadPrep.summary.originalBytes}
+                    compressedBytes={modalUploadPrep.summary.compressedBytes}
+                    savedBytes={modalUploadPrep.summary.savedBytes}
+                    savedPercent={modalUploadPrep.summary.savedPercent}
+                    unchangedImages={modalUploadPrep.summary.unchangedImages}
+                  />
+                )}
+                <PreparedUploadList
+                  items={modalUploadPrep.items}
+                  compressEnabled={compressUploadImages}
+                  disabled={uploading}
+                  onRemove={modalUploadPrep.removeFile}
+                />
+                {uploading && modalUploadProgress && (
+                  <UploadTransferProgressPanel
+                    progress={modalUploadProgress}
+                    label="正在上传素材…"
+                  />
                 )}
               </div>
 
               <div className="flex justify-end gap-2 border-t border-gray-100 pt-3">
+                {modalUploadPrep.items.length > 0 && (
+                  <button
+                    type="button"
+                    disabled={uploading}
+                    onClick={modalUploadPrep.clear}
+                    className="mr-auto rounded-lg border border-gray-200 px-3 py-2 font-medium text-gray-600 hover:bg-gray-50 disabled:opacity-50"
+                  >
+                    清空队列
+                  </button>
+                )}
                 <button
                   type="button"
                   disabled={uploading}
-                  onClick={() => setUploadModalOpen(false)}
+                  onClick={closeUploadModal}
                   className="rounded-lg border border-gray-200 px-3.5 py-2 font-medium text-gray-700 hover:bg-gray-50"
                 >
                   取消
                 </button>
                 <button
                   type="button"
-                  disabled={uploading || uploadPendingFiles.length === 0}
+                  disabled={
+                    uploading ||
+                    modalUploadPrep.items.length === 0 ||
+                    modalUploadPrep.summary.isCompressing
+                  }
                   onClick={() =>
-                    void performUpload(uploadPendingFiles, {
-                      productId: uploadTargetProductId || undefined,
-                      folderId: uploadTargetFolderId || undefined,
-                      purpose: uploadTargetPurpose || undefined,
-                      storageId: uploadTargetStorageId || undefined
-                    })
+                    void performUpload(
+                      modalUploadPrep.items.map((item) => item.originalFile),
+                      {
+                        source: "modal",
+                        productId: uploadTargetProductId || undefined,
+                        folderId: uploadTargetFolderId || undefined,
+                        purpose: uploadTargetPurpose || undefined,
+                        storageId: uploadTargetStorageId || undefined,
+                        preparedFiles: modalUploadPrep.preparedFiles,
+                        compressionSummary: modalUploadPrep.summary.compressionSummary
+                      }
+                    )
                   }
                   className="rounded-lg bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-700 disabled:opacity-50"
                 >
-                  {uploading
-                    ? "上传中..."
-                    : `开始上传 (${uploadPendingFiles.length})`}
+                  {modalUploadPrep.summary.isCompressing
+                    ? `正在压缩 (${modalUploadPrep.summary.completedCount}/${modalUploadPrep.summary.compressibleCount})…`
+                    : uploading
+                      ? modalUploadProgress?.phase === "processing"
+                        ? "服务器处理中…"
+                        : modalUploadProgress
+                          ? `上传中 ${modalUploadProgress.percent}%`
+                          : "上传中..."
+                      : `开始上传 (${modalUploadPrep.items.length})`}
                 </button>
               </div>
             </div>

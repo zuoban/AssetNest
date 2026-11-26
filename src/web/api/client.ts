@@ -55,7 +55,15 @@ import type {
   TrashResponse,
   UserProfile
 } from "../../shared/types";
-import { compressImageForUpload } from "../utils/imageCompression";
+import {
+  compressFilesWithProgress,
+  computeImageUploadSizes,
+  type CompressionBatchProgress,
+  type ImageUploadSizes,
+  type PreparedUploadFile
+} from "../utils/uploadPreparation";
+
+export type { CompressionBatchProgress, ImageUploadSizes, PreparedUploadFile };
 
 export class ApiClientError extends Error {
   readonly status: number;
@@ -98,31 +106,149 @@ async function requestJson<T>(url: string, init: RequestInit = {}): Promise<T> {
   return (await res.json()) as T;
 }
 
-export interface ImageUploadSizes {
-  originalBytes: number;
-  uploadedBytes: number;
-  unchangedImages: number;
+export interface UploadTransferProgress {
+  loaded: number;
+  total: number;
+  percent: number;
+  phase: "uploading" | "processing";
+}
+
+export function uploadFormJson<T>(
+  url: string,
+  form: FormData,
+  onProgress?: (progress: UploadTransferProgress) => void,
+  fallbackTotalBytes = 0
+): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url, true);
+    xhr.setRequestHeader("X-AssetNest-Request", "1");
+
+    let lastLoaded = 0;
+    let lastTotal = fallbackTotalBytes;
+
+    if (onProgress && xhr.upload) {
+      xhr.upload.onloadstart = (event: ProgressEvent) => {
+        const total =
+          event.lengthComputable && event.total > 0 ? event.total : fallbackTotalBytes;
+        lastTotal = total;
+        onProgress({
+          loaded: 0,
+          total,
+          percent: 0,
+          phase: "uploading"
+        });
+      };
+
+      xhr.upload.onprogress = (event: ProgressEvent) => {
+        const total =
+          event.lengthComputable && event.total > 0
+            ? event.total
+            : Math.max(event.total || 0, lastTotal, event.loaded || 0);
+        const loaded = total > 0 ? Math.min(event.loaded, total) : event.loaded;
+        lastLoaded = loaded;
+        lastTotal = total;
+        const percent =
+          total > 0 ? Math.min(100, Math.max(0, Math.round((loaded / total) * 100))) : 0;
+        onProgress({
+          loaded,
+          total,
+          percent,
+          phase: "uploading"
+        });
+      };
+
+      xhr.upload.onload = (event: ProgressEvent) => {
+        const total =
+          event.lengthComputable && event.total > 0
+            ? event.total
+            : Math.max(lastTotal, lastLoaded, fallbackTotalBytes);
+        onProgress({
+          loaded: total,
+          total,
+          percent: 100,
+          phase: "processing"
+        });
+      };
+    }
+
+    xhr.onload = () => {
+      if (xhr.status < 200 || xhr.status >= 300) {
+        let code = "HTTP_ERROR";
+        let message = `请求失败（HTTP ${xhr.status}）`;
+        try {
+          const parsed = JSON.parse(xhr.responseText) as Partial<ApiErrorBody>;
+          if (parsed.error?.code) code = parsed.error.code;
+          if (parsed.error?.message) message = parsed.error.message;
+        } catch {
+          // ignore non-json error body
+        }
+        reject(new ApiClientError(xhr.status, code, message));
+        return;
+      }
+      try {
+        resolve(JSON.parse(xhr.responseText) as T);
+      } catch {
+        reject(new ApiClientError(xhr.status, "INVALID_RESPONSE", "服务器返回了无效的响应格式"));
+      }
+    };
+
+    xhr.onerror = () => {
+      reject(new ApiClientError(0, "NETWORK_ERROR", "网络请求失败，请检查网络连接"));
+    };
+
+    xhr.onabort = () => {
+      reject(new ApiClientError(0, "UPLOAD_ABORTED", "上传已取消"));
+    };
+
+    xhr.send(form);
+  });
 }
 
 async function appendUploadFiles(
   form: FormData,
   field: "files" | "file",
   files: File[],
-  compressImages?: boolean
-): Promise<ImageUploadSizes | null> {
-  let sizes: ImageUploadSizes | null = null;
-  for (const original of files) {
-    const handleImage = compressImages && original.type.startsWith("image/");
-    const upload = handleImage ? await compressImageForUpload(original) : original;
-    form.append(field, upload, original.name);
-    if (handleImage) {
-      sizes ??= { originalBytes: 0, uploadedBytes: 0, unchangedImages: 0 };
-      sizes.originalBytes += original.size;
-      sizes.uploadedBytes += upload.size;
-      if (upload.size === original.size) sizes.unchangedImages++;
+  options: {
+    compressImages?: boolean;
+    preparedFiles?: PreparedUploadFile[];
+    compressionSummary?: ImageUploadSizes | null;
+    onCompressionProgress?: (progress: CompressionBatchProgress) => void;
+  } = {}
+): Promise<{ compression: ImageUploadSizes | null; totalBytes: number }> {
+  if (options.preparedFiles && options.preparedFiles.length > 0) {
+    let totalBytes = 0;
+    for (const { original, upload } of options.preparedFiles) {
+      form.append(field, upload, original.name);
+      totalBytes += upload.size;
     }
+    const compression =
+      options.compressionSummary !== undefined
+        ? options.compressionSummary
+        : options.compressImages
+          ? computeImageUploadSizes(options.preparedFiles)
+          : null;
+    return { compression, totalBytes };
   }
-  return sizes;
+
+  if (options.compressImages) {
+    const { prepared, compression } = await compressFilesWithProgress(files, {
+      onProgress: options.onCompressionProgress
+    });
+    let totalBytes = 0;
+    for (const { original, upload } of prepared) {
+      form.append(field, upload, original.name);
+      totalBytes += upload.size;
+    }
+    return { compression, totalBytes };
+  }
+
+  let totalBytes = 0;
+  for (const original of files) {
+    form.append(field, original, original.name);
+    totalBytes += original.size;
+  }
+  return { compression: null, totalBytes };
 }
 
 export const api = {
@@ -396,6 +522,10 @@ export const api = {
     files: File[],
     options: {
       compressImages?: boolean;
+      preparedFiles?: PreparedUploadFile[];
+      compressionSummary?: ImageUploadSizes | null;
+      onCompressionProgress?: (progress: CompressionBatchProgress) => void;
+      onUploadProgress?: (progress: UploadTransferProgress) => void;
       productId?: string;
       folderId?: string | null;
       storageId?: string;
@@ -417,10 +547,17 @@ export const api = {
     if (options.source) form.append("source", options.source);
     if (options.notes) form.append("notes", options.notes);
     if (options.promptText) form.append("promptText", options.promptText);
-    const compression = await appendUploadFiles(form, "files", files, options.compressImages);
-    const result = await requestJson<{ items: AssetDetail[]; uploadedCount: number; deduplicatedCount: number }>(
-      "/api/v1/assets/upload", { method: "POST", body: form }
-    );
+    const { compression, totalBytes } = await appendUploadFiles(form, "files", files, {
+      compressImages: options.compressImages,
+      preparedFiles: options.preparedFiles,
+      compressionSummary: options.compressionSummary,
+      onCompressionProgress: options.onCompressionProgress
+    });
+    const result = await uploadFormJson<{
+      items: AssetDetail[];
+      uploadedCount: number;
+      deduplicatedCount: number;
+    }>("/api/v1/assets/upload", form, options.onUploadProgress, totalBytes);
     return { ...result, compression };
   },
   async appendAssetVersion(
@@ -428,6 +565,11 @@ export const api = {
     file: File,
     options: {
       compressImages?: boolean;
+      preparedFile?: PreparedUploadFile;
+      preparedFiles?: PreparedUploadFile[];
+      compressionSummary?: ImageUploadSizes | null;
+      onCompressionProgress?: (progress: CompressionBatchProgress) => void;
+      onUploadProgress?: (progress: UploadTransferProgress) => void;
       storageId?: string;
       changeNote?: string;
       promptText?: string;
@@ -445,10 +587,19 @@ export const api = {
     if (options.setAsCurrent !== undefined) {
       form.append("setAsCurrent", options.setAsCurrent ? "true" : "false");
     }
-    const compression = await appendUploadFiles(form, "file", [file], options.compressImages);
-    const result = await requestJson<{ asset: AssetDetail; version: AssetVersionRecord; deduplicated: boolean }>(
-      `/api/v1/assets/${encodeURIComponent(assetId)}/versions`, { method: "POST", body: form }
-    );
+    const preparedFiles =
+      options.preparedFiles ?? (options.preparedFile ? [options.preparedFile] : undefined);
+    const { compression, totalBytes } = await appendUploadFiles(form, "file", [file], {
+      compressImages: options.compressImages,
+      preparedFiles,
+      compressionSummary: options.compressionSummary,
+      onCompressionProgress: options.onCompressionProgress
+    });
+    const result = await uploadFormJson<{
+      asset: AssetDetail;
+      version: AssetVersionRecord;
+      deduplicated: boolean;
+    }>(`/api/v1/assets/${encodeURIComponent(assetId)}/versions`, form, options.onUploadProgress, totalBytes);
     return { ...result, compression };
   },
   switchAssetCurrentVersion(assetId: string, versionId: string): Promise<AssetDetail> {
