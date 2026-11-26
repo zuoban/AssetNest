@@ -32,6 +32,12 @@ export type StorageProviderStatus =
   | "offline"
   | "missing_config";
 
+export interface StorageCapabilitiesInfo {
+  rangeRead: boolean;
+  presignedUrl: boolean;
+  multipartUpload: boolean;
+}
+
 export interface StorageProviderSummary {
   id: string;
   name: string;
@@ -39,9 +45,44 @@ export interface StorageProviderSummary {
   enabled: boolean;
   isDefault: boolean;
   status: StorageProviderStatus;
+  capabilities: StorageCapabilitiesInfo;
+  fileCount: number;
+  totalBytes: number;
   lastTestedAt: string | null;
   lastError: string | null;
 }
+
+export type ConnectionErrorCode =
+  | "OK"
+  | "AUTH_FAILED"
+  | "PERMISSION_DENIED"
+  | "NOT_FOUND"
+  | "TIMEOUT"
+  | "NETWORK_ERROR"
+  | "INTEGRITY_MISMATCH"
+  | "INVALID_CONFIG";
+
+export interface StorageTestResponse {
+  provider: StorageProviderSummary;
+  result: {
+    ok: boolean;
+    latencyMs: number;
+    code: ConnectionErrorCode;
+    message: string;
+  };
+}
+
+export type JobType =
+  | "thumbnail"
+  | "search_reindex"
+  | "export_zip"
+  | "storage_migrate"
+  | "storage_cleanup"
+  | "gc"
+  | "backup"
+  | "restore";
+
+export type JobStatus = "queued" | "running" | "succeeded" | "failed" | "cancelled";
 
 export interface HealthResponse {
   status: "ok" | "maintenance";
@@ -73,15 +114,18 @@ export interface AuthMeResponse {
 
 export interface JobRecord {
   id: string;
-  type: string;
-  status: "queued" | "running" | "succeeded" | "failed" | "cancelled";
+  type: JobType;
+  status: JobStatus;
   priority: number;
   progressStage: string | null;
   progressCurrent: number;
   progressTotal: number | null;
   attempts: number;
   maxAttempts: number;
+  cancelRequested: boolean;
   lastError: string | null;
+  payload?: Record<string, unknown>;
+  result?: Record<string, unknown> | null;
   createdAt: string;
   updatedAt: string;
   startedAt: string | null;
@@ -302,4 +346,78 @@ export interface TrashProductItem {
 export interface TrashResponse {
   assets: TrashAssetItem[];
   products: TrashProductItem[];
+}
+
+export interface MigrationScopeInput {
+  mode: "all" | "product" | "asset_ids";
+  productId?: string;
+  assetIds?: string[];
+}
+
+export interface MigrationPreviewResponse {
+  sourceStorageId: string;
+  targetStorageId: string;
+  fileCount: number;
+  totalBytes: number;
+  alreadyOnTargetCount: number;
+  affectedAssetCount: number;
+  affectedProductCount: number;
+  sharedFileCount: number;
+  affectedAssets: Array<{
+    id: string;
+    name: string;
+    originalFilename: string;
+    deletedAt: string | null;
+  }>;
+  affectedProducts: Array<{
+    id: string;
+    spu: string;
+    nameZh: string;
+    nameEn: string;
+  }>;
+}
+
+export interface StorageCleanupItem {
+  id: string;
+  storageId: string;
+  objectKey: string;
+  sha256: string;
+  sizeBytes: number;
+  reason: "migration_source" | "gc_unreferenced";
+  sourceJobId: string | null;
+  status: "awaiting_confirmation" | "queued" | "deleted" | "failed";
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StorageCleanupQueueResponse {
+  items: StorageCleanupItem[];
+  summary: {
+    awaitingCount: number;
+    queuedCount: number;
+    failedCount: number;
+    deletedCount: number;
+    reclaimableBytes: number;
+  };
+}
+
+export interface CacheClearResult {
+  clearedFiles: number;
+  freedBytes: number;
+}
+
+export type BackupKind = "metadata" | "full";
+
+export interface BackupRecord {
+  id: string;
+  kind: BackupKind;
+  jobId: string | null;
+  sizeBytes: number;
+  sha256: string | null;
+  schemaVersion: number;
+  fileCount: number;
+  status: "creating" | "ready" | "failed" | "deleted";
+  lastError: string | null;
+  createdAt: string;
 }

@@ -4,12 +4,14 @@ import type {
   DashboardResponse,
   JobRecord,
   PaginatedResponse,
+  StorageCapabilitiesInfo,
   StorageProviderStatus,
   StorageProviderSummary,
   StorageProviderType
 } from "../../../shared/types.js";
 import type { ResolvedAppConfig } from "../../config/schema.js";
 import type { AppDatabase } from "../../db/database.js";
+import { mapJobRow, type JobRow } from "../jobs/service.js";
 import { recordActivity } from "./activity.js";
 
 function safeTableCount(db: AppDatabase, tableName: string, whereClause = ""): number {
@@ -169,7 +171,7 @@ export function listStorageProviders(db: AppDatabase): StorageProviderSummary[] 
   const settings = getAppSettings(db, "Asia/Shanghai");
   const rows = db.raw
     .prepare(
-      `SELECT id, name, type, enabled, status, last_tested_at, last_error
+      `SELECT id, name, type, enabled, status, capabilities_json, last_tested_at, last_error
        FROM storage_providers
        ORDER BY CASE WHEN id = ? THEN 0 ELSE 1 END, id ASC`
     )
@@ -179,20 +181,63 @@ export function listStorageProviders(db: AppDatabase): StorageProviderSummary[] 
     type: StorageProviderType;
     enabled: number;
     status: StorageProviderStatus;
+    capabilities_json: string;
     last_tested_at: string | null;
     last_error: string | null;
   }>;
 
-  return rows.map((row) => ({
-    id: row.id,
-    name: row.name,
-    type: row.type,
-    enabled: row.enabled === 1,
-    isDefault: row.id === settings.defaultStorageId,
-    status: row.status,
-    lastTestedAt: row.last_tested_at,
-    lastError: row.last_error
-  }));
+  const statsByStorage = new Map<string, { fileCount: number; totalBytes: number }>();
+  const filesTableExists = db.raw
+    .prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'files'")
+    .get() as { ok: number } | undefined;
+  if (filesTableExists) {
+    const statRows = db.raw
+      .prepare(
+        `SELECT storage_id, COUNT(*) AS file_count, COALESCE(SUM(size_bytes), 0) AS total_bytes
+         FROM files
+         WHERE state = 'ready'
+         GROUP BY storage_id`
+      )
+      .all() as Array<{ storage_id: string; file_count: number; total_bytes: number }>;
+    for (const stat of statRows) {
+      statsByStorage.set(stat.storage_id, {
+        fileCount: Number(stat.file_count),
+        totalBytes: Number(stat.total_bytes)
+      });
+    }
+  }
+
+  return rows.map((row) => {
+    let capabilities: StorageCapabilitiesInfo = {
+      rangeRead: row.type === "local" || row.type === "s3",
+      presignedUrl: row.type === "s3",
+      multipartUpload: row.type === "s3"
+    };
+    try {
+      const parsed = JSON.parse(row.capabilities_json) as Partial<StorageCapabilitiesInfo>;
+      capabilities = {
+        rangeRead: Boolean(parsed.rangeRead ?? capabilities.rangeRead),
+        presignedUrl: Boolean(parsed.presignedUrl ?? capabilities.presignedUrl),
+        multipartUpload: Boolean(parsed.multipartUpload ?? capabilities.multipartUpload)
+      };
+    } catch {
+      // keep defaults
+    }
+    const stats = statsByStorage.get(row.id) ?? { fileCount: 0, totalBytes: 0 };
+    return {
+      id: row.id,
+      name: row.name,
+      type: row.type,
+      enabled: row.enabled === 1,
+      isDefault: row.id === settings.defaultStorageId,
+      status: row.status,
+      capabilities,
+      fileCount: stats.fileCount,
+      totalBytes: stats.totalBytes,
+      lastTestedAt: row.last_tested_at,
+      lastError: row.last_error
+    };
+  });
 }
 
 export function listJobs(
@@ -207,46 +252,18 @@ export function listJobs(
   const totalRow = db.raw.prepare("SELECT COUNT(*) AS count FROM jobs").get() as { count: number };
   const rows = db.raw
     .prepare(
-      `SELECT id, type, status, priority, progress_stage, progress_current, progress_total,
-              attempts, max_attempts, last_error, created_at, updated_at, started_at, finished_at
+      `SELECT id, type, status, priority, payload_json, result_json,
+              progress_stage, progress_current, progress_total,
+              attempts, max_attempts, run_after, lease_owner, lease_until,
+              cancel_requested, last_error, created_at, updated_at, started_at, finished_at
        FROM jobs
        ORDER BY created_at DESC
        LIMIT ? OFFSET ?`
     )
-    .all(safeSize, offset) as Array<{
-    id: string;
-    type: string;
-    status: JobRecord["status"];
-    priority: number;
-    progress_stage: string | null;
-    progress_current: number;
-    progress_total: number | null;
-    attempts: number;
-    max_attempts: number;
-    last_error: string | null;
-    created_at: string;
-    updated_at: string;
-    started_at: string | null;
-    finished_at: string | null;
-  }>;
+    .all(safeSize, offset) as unknown as JobRow[];
 
   return {
-    items: rows.map((row) => ({
-      id: row.id,
-      type: row.type,
-      status: row.status,
-      priority: row.priority,
-      progressStage: row.progress_stage,
-      progressCurrent: row.progress_current,
-      progressTotal: row.progress_total,
-      attempts: row.attempts,
-      maxAttempts: row.max_attempts,
-      lastError: row.last_error,
-      createdAt: row.created_at,
-      updatedAt: row.updated_at,
-      startedAt: row.started_at,
-      finishedAt: row.finished_at
-    })),
+    items: rows.map(mapJobRow),
     total: Number(totalRow.count),
     page: safePage,
     pageSize: safeSize

@@ -7,9 +7,14 @@ import type {
   AssetListItem,
   AssetType,
   AuthMeResponse,
+  BackupKind,
+  BackupRecord,
+  CacheClearResult,
   DashboardResponse,
   FolderRecord,
   JobRecord,
+  MigrationPreviewResponse,
+  MigrationScopeInput,
   PaginatedResponse,
   ProductDetail,
   ProductSpec,
@@ -19,7 +24,10 @@ import type {
   SetupStatusResponse,
   SkuRecord,
   SkuStatus,
+  StorageCleanupItem,
+  StorageCleanupQueueResponse,
   StorageProviderSummary,
+  StorageTestResponse,
   TagDimension,
   TagRecord,
   TrashResponse,
@@ -397,5 +405,98 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ type, ids })
     });
+  },
+  runTrashGc(forceIgnoreRetention = false): Promise<{ job: JobRecord }> {
+    return requestJson("/api/v1/trash/gc", {
+      method: "POST",
+      body: JSON.stringify({ forceIgnoreRetention })
+    });
+  },
+  testStorageProvider(providerId: string): Promise<StorageTestResponse> {
+    return requestJson(`/api/v1/storage/providers/${encodeURIComponent(providerId)}/test`, {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+  },
+  switchDefaultStorage(
+    storageId: string
+  ): Promise<{ defaultStorageId: string; provider: StorageProviderSummary }> {
+    return requestJson("/api/v1/storage/default", {
+      method: "POST",
+      body: JSON.stringify({ storageId })
+    });
+  },
+  deleteStorageProvider(providerId: string): Promise<{ deleted: true; id: string }> {
+    return requestJson(`/api/v1/storage/providers/${encodeURIComponent(providerId)}`, {
+      method: "DELETE"
+    });
+  },
+  previewStorageMigration(payload: {
+    sourceStorageId: string;
+    targetStorageId: string;
+    scope?: MigrationScopeInput;
+  }): Promise<MigrationPreviewResponse> {
+    return requestJson("/api/v1/storage/migrations/preview", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  },
+  startStorageMigration(payload: {
+    sourceStorageId: string;
+    targetStorageId: string;
+    scope?: MigrationScopeInput;
+  }): Promise<{ job: JobRecord; preview: MigrationPreviewResponse }> {
+    return requestJson("/api/v1/storage/migrations", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  },
+  getStorageCleanupQueue(
+    status?: StorageCleanupItem["status"]
+  ): Promise<StorageCleanupQueueResponse> {
+    const qs = status ? `?status=${encodeURIComponent(status)}` : "";
+    return requestJson(`/api/v1/storage/cleanup-queue${qs}`);
+  },
+  confirmStorageCleanup(payload: {
+    ids?: string[];
+    allAwaiting?: boolean;
+  }): Promise<{ job: JobRecord; queuedCount: number }> {
+    return requestJson("/api/v1/storage/cleanup-queue/confirm", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  },
+  getJob(jobId: string): Promise<JobRecord> {
+    return requestJson(`/api/v1/jobs/${encodeURIComponent(jobId)}`);
+  },
+  retryJob(jobId: string): Promise<JobRecord> {
+    return requestJson(`/api/v1/jobs/${encodeURIComponent(jobId)}/retry`, {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+  },
+  cancelJob(jobId: string): Promise<JobRecord> {
+    return requestJson(`/api/v1/jobs/${encodeURIComponent(jobId)}/cancel`, {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+  },
+  clearThumbnailCache(): Promise<CacheClearResult> {
+    return requestJson("/api/v1/cache/clear", {
+      method: "POST",
+      body: JSON.stringify({})
+    });
+  },
+  getBackups(): Promise<{ items: BackupRecord[] }> {
+    return requestJson("/api/v1/backups");
+  },
+  createBackup(kind: BackupKind): Promise<{ backup: BackupRecord; job: JobRecord }> {
+    return requestJson("/api/v1/backups", {
+      method: "POST",
+      body: JSON.stringify({ kind })
+    });
+  },
+  backupDownloadUrl(backupId: string): string {
+    return `/api/v1/backups/${encodeURIComponent(backupId)}/download`;
   }
 };

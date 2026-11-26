@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { Link } from "react-router-dom";
 import {
   AlertCircle,
   CheckCircle2,
@@ -6,6 +7,7 @@ import {
   Package,
   RefreshCw,
   RotateCcw,
+  ShieldAlert,
   Trash2
 } from "lucide-react";
 import type { TrashResponse } from "../../shared/types";
@@ -18,6 +20,8 @@ export function TrashPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [restoring, setRestoring] = useState(false);
+  const [runningGc, setRunningGc] = useState(false);
+  const [forceImmediateGc, setForceImmediateGc] = useState(false);
   const [tab, setTab] = useState<"assets" | "products">("assets");
   const [selectedAssetIds, setSelectedAssetIds] = useState<Set<string>>(new Set());
   const [selectedProductIds, setSelectedProductIds] = useState<Set<string>>(new Set());
@@ -59,6 +63,26 @@ export function TrashPage() {
     }
   };
 
+  const handleRunGc = async () => {
+    setRunningGc(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await api.runTrashGc(forceImmediateGc);
+      setNotice(
+        `已入队受引用保护的垃圾回收任务 ${res.job.id.slice(0, 8)}（${
+          forceImmediateGc ? "已选择忽略保留天数立即扫描" : "按通用设置保留天数扫描过期记录"
+        }）。被历史版本或发布快照引用的文件将自动跳过保护。`
+      );
+      setForceImmediateGc(false);
+      setTimeout(() => void loadTrash(), 800);
+    } catch (err) {
+      setError(err instanceof ApiClientError ? err.message : "触发垃圾回收失败");
+    } finally {
+      setRunningGc(false);
+    }
+  };
+
   const assets = data?.assets ?? [];
   const products = data?.products ?? [];
 
@@ -80,6 +104,41 @@ export function TrashPage() {
           <RefreshCw className={`h-3.5 w-3.5 ${loading ? "animate-spin" : ""}`} />
           <span>刷新</span>
         </button>
+      </div>
+
+      <div className="flex flex-wrap items-center justify-between gap-3 rounded-xl border border-gray-200 bg-white px-4 py-3 text-xs">
+        <div className="flex items-start gap-2 text-gray-600">
+          <ShieldAlert className="mt-0.5 h-4 w-4 shrink-0 text-amber-600" />
+          <div>
+            <div className="font-medium text-gray-900">引用保护垃圾回收（GC）</div>
+            <div className="mt-0.5">
+              自动清理超过保留期的回收站项目与零引用孤立物理文件；若远程存储离线导致删除失败，失败项会保留在清理队列中供后续重试。
+            </div>
+          </div>
+        </div>
+        <div className="flex flex-wrap items-center gap-3">
+          <label className="inline-flex cursor-pointer items-center gap-1.5 text-gray-700">
+            <input
+              type="checkbox"
+              checked={forceImmediateGc}
+              onChange={(e) => setForceImmediateGc(e.target.checked)}
+              className="rounded border-gray-300"
+            />
+            <span>忽略保留天数立即清理</span>
+          </label>
+          <button
+            type="button"
+            onClick={() => void handleRunGc()}
+            disabled={runningGc}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-rose-200 bg-rose-50 px-3 py-1.5 font-medium text-rose-700 hover:bg-rose-100 disabled:opacity-50"
+          >
+            <Trash2 className="h-3.5 w-3.5" />
+            <span>{runningGc ? "正在提交 GC..." : "执行安全 GC"}</span>
+          </button>
+          <Link to="/jobs" className="font-medium text-blue-600 hover:underline">
+            任务日志 →
+          </Link>
+        </div>
       </div>
 
       {error && (

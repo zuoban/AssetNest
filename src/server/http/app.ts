@@ -11,12 +11,27 @@ import type { ResolvedAppConfig } from "../config/schema.js";
 import { openDatabase, type AppDatabase } from "../db/database.js";
 import { runMigrations } from "../db/migrator.js";
 import { registerAssetRoutes } from "../modules/assets/routes.js";
+import { ensureThumbnailReady, resolveAssetVersionFile } from "../modules/assets/service.js";
 import { registerAuthRoutes } from "../modules/auth/routes.js";
 import { isSystemInitialized } from "../modules/auth/service.js";
+import { registerBackupRoutes } from "../modules/backups/routes.js";
+import { executeBackupJob } from "../modules/backups/service.js";
+import { registerJobRoutes } from "../modules/jobs/routes.js";
+import { JobWorker } from "../modules/jobs/worker.js";
 import { registerProductRoutes } from "../modules/products/routes.js";
+import {
+  rebuildAssetSearchDocument,
+  rebuildProductSearchDocument
+} from "../modules/search/service.js";
+import { registerStorageOpsRoutes } from "../modules/storage-ops/routes.js";
+import {
+  executeStorageCleanupJob,
+  executeStorageMigrationJob
+} from "../modules/storage-ops/service.js";
 import { registerSystemRoutes } from "../modules/system/routes.js";
 import { syncSystemBootstrapState } from "../modules/system/service.js";
 import { registerTaxonomyRoutes } from "../modules/taxonomy/routes.js";
+import { executeGcJob } from "../modules/trash/gc.js";
 import { registerTrashRoutes } from "../modules/trash/routes.js";
 import { StorageRegistry } from "../storage/registry.js";
 import { AppError, registerErrorHandler } from "./errors.js";
@@ -30,6 +45,9 @@ export interface CreateAppOptions {
   logger?: boolean;
   webDistDir?: string;
   loginRateLimitMax?: number;
+  startWorker?: boolean;
+  workerPollIntervalMs?: number;
+  workerRetryBaseDelayMs?: number;
 }
 
 export interface AppRuntime {
@@ -37,6 +55,7 @@ export interface AppRuntime {
   db: AppDatabase;
   config: ResolvedAppConfig;
   storageRegistry: StorageRegistry;
+  worker: JobWorker;
   setMaintenanceMode(enabled: boolean): void;
   close(): Promise<void>;
 }
@@ -47,7 +66,10 @@ export async function createApp(options: CreateAppOptions): Promise<AppRuntime> 
     acquireInstanceLock = false,
     logger = true,
     webDistDir = path.resolve(import.meta.dirname, "../../../dist/web"),
-    loginRateLimitMax = 10
+    loginRateLimitMax = 10,
+    startWorker = true,
+    workerPollIntervalMs = 1500,
+    workerRetryBaseDelayMs = 3000
   } = options;
 
   ensureRuntimeDirectories(config);
@@ -86,6 +108,48 @@ export async function createApp(options: CreateAppOptions): Promise<AppRuntime> 
           }
         }
       : false
+  });
+
+  const worker = new JobWorker(db, {
+    concurrency: config.worker.concurrency,
+    pollIntervalMs: workerPollIntervalMs,
+    retryBaseDelayMs: workerRetryBaseDelayMs,
+    onError: (err, jobId) => {
+      app.log.error({ err, jobId }, "Background job error");
+    }
+  });
+
+  worker.registerHandler("storage_migrate", (payload, ctx) =>
+    executeStorageMigrationJob(db, config, storageRegistry, payload, ctx)
+  );
+  worker.registerHandler("storage_cleanup", (payload, ctx) =>
+    executeStorageCleanupJob(db, storageRegistry, payload, ctx)
+  );
+  worker.registerHandler("gc", (payload, ctx) =>
+    executeGcJob(db, config, storageRegistry, payload, ctx)
+  );
+  worker.registerHandler("backup", (payload, ctx) =>
+    executeBackupJob(db, config, storageRegistry, APP_VERSION, payload, ctx)
+  );
+  worker.registerHandler("thumbnail", async (payload) => {
+    const assetId = String(payload.assetId ?? "");
+    const versionId = String(payload.versionId ?? "");
+    if (!assetId || !versionId) {
+      return { skipped: true };
+    }
+    const versionInfo = resolveAssetVersionFile(db, assetId, versionId);
+    const res = await ensureThumbnailReady(db, config, storageRegistry, versionInfo, false);
+    return { thumbStatus: res.thumbStatus, regenerated: res.regenerated };
+  });
+  worker.registerHandler("search_reindex", async (payload) => {
+    const entityType = payload.entityType;
+    const entityId = String(payload.entityId ?? "");
+    if (entityType === "asset" && entityId) {
+      rebuildAssetSearchDocument(db, entityId);
+    } else if (entityType === "product" && entityId) {
+      rebuildProductSearchDocument(db, entityId);
+    }
+    return { reindexed: true };
   });
 
   await app.register(cookie);
@@ -143,10 +207,13 @@ export async function createApp(options: CreateAppOptions): Promise<AppRuntime> 
     loginRateLimitMax
   });
   registerSystemRoutes(app, db, config);
+  registerJobRoutes(app, db, worker);
+  registerStorageOpsRoutes(app, db, config, storageRegistry, worker);
+  registerBackupRoutes(app, db, config, worker);
   registerProductRoutes(app, db);
   registerTaxonomyRoutes(app, db);
   registerAssetRoutes(app, db, config, storageRegistry);
-  registerTrashRoutes(app, db);
+  registerTrashRoutes(app, db, worker);
 
   app.all("/api/*", async () => {
     throw new AppError(404, "NOT_FOUND", "请求的 API 接口不存在");
@@ -172,11 +239,16 @@ export async function createApp(options: CreateAppOptions): Promise<AppRuntime> 
     });
   }
 
+  if (startWorker) {
+    worker.start();
+  }
+
   let closed = false;
   async function close(): Promise<void> {
     if (closed) return;
     closed = true;
     try {
+      await worker.stop();
       await app.close();
     } finally {
       db.close();
@@ -188,6 +260,7 @@ export async function createApp(options: CreateAppOptions): Promise<AppRuntime> 
     db,
     config,
     storageRegistry,
+    worker,
     setMaintenanceMode(enabled: boolean) {
       maintenanceMode = enabled;
     },

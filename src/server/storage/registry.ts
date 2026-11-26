@@ -1,7 +1,9 @@
 import type { ResolvedAppConfig } from "../config/schema.js";
 import { AppError } from "../http/errors.js";
 import { LocalStorageProvider } from "./local.js";
+import { S3StorageProvider } from "./s3.js";
 import type { StorageProvider } from "./types.js";
+import { WebDavStorageProvider } from "./webdav.js";
 
 export class StorageRegistry {
   private readonly providers = new Map<string, StorageProvider>();
@@ -18,6 +20,34 @@ export class StorageRegistry {
             id: providerId,
             name: providerCfg.name ?? (providerId === "local" ? "本地存储" : providerId),
             rootDir: providerCfg.root
+          })
+        );
+      } else if (providerCfg.type === "s3") {
+        this.providers.set(
+          providerId,
+          new S3StorageProvider({
+            id: providerId,
+            name: providerCfg.name ?? providerId,
+            endpoint: providerCfg.endpoint,
+            region: providerCfg.region,
+            bucket: providerCfg.bucket,
+            prefix: providerCfg.prefix,
+            accessKeyId: providerCfg.accessKeyId,
+            secretAccessKey: providerCfg.secretAccessKey,
+            sessionToken: providerCfg.sessionToken,
+            forcePathStyle: providerCfg.forcePathStyle
+          })
+        );
+      } else if (providerCfg.type === "webdav") {
+        this.providers.set(
+          providerId,
+          new WebDavStorageProvider({
+            id: providerId,
+            name: providerCfg.name ?? providerId,
+            endpoint: providerCfg.endpoint,
+            root: providerCfg.root,
+            username: providerCfg.username,
+            password: providerCfg.password
           })
         );
       }
@@ -42,5 +72,9 @@ export class StorageRegistry {
 
   public listIds(): string[] {
     return Array.from(this.providers.keys());
+  }
+
+  public register(provider: StorageProvider): void {
+    this.providers.set(provider.id, provider);
   }
 }
