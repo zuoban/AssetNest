@@ -192,6 +192,8 @@ export interface AppearanceConstraints {
   color?: string;
   dimensions?: string;
   forbiddenChanges?: string;
+  referenceNotes?: string;
+  referenceAssetVersionIds?: string[];
 }
 
 export interface SkuRecord {
@@ -262,6 +264,7 @@ export interface AssetVersionRecord {
   originalFilename: string;
   changeNote: string;
   promptText: string;
+  referenceAssetVersionId: string | null;
   reviewStatus: ReviewStatus;
   reviewNote: string;
   reviewedAt: string | null;
@@ -275,6 +278,13 @@ export interface AssetVersionRecord {
   width: number | null;
   height: number | null;
   durationMs: number | null;
+  lockedMasterProducts?: Array<{
+    masterImageId: string;
+    productId: string;
+    spu: string;
+    angle: string;
+    isPrimary: boolean;
+  }>;
   createdAt: string;
 }
 
@@ -343,9 +353,25 @@ export interface TrashProductItem {
   deletedAt: string;
 }
 
+export interface TrashListingItem {
+  id: string;
+  productId: string;
+  productSpu: string;
+  productNameZh: string;
+  storeId: string;
+  storeName: string;
+  platform: string;
+  market: string;
+  displayName: string;
+  language: string;
+  status: ListingStatus;
+  deletedAt: string;
+}
+
 export interface TrashResponse {
   assets: TrashAssetItem[];
   products: TrashProductItem[];
+  listings: TrashListingItem[];
 }
 
 export interface MigrationScopeInput {
@@ -420,4 +446,220 @@ export interface BackupRecord {
   status: "creating" | "ready" | "failed" | "deleted";
   lastError: string | null;
   createdAt: string;
+}
+
+// M3: E-commerce workflow types
+
+export type DictionaryCategory = "platform" | "market" | "language";
+
+export interface DictionaryRecord {
+  category: DictionaryCategory;
+  code: string;
+  label: string;
+  isActive: boolean;
+  position: number;
+}
+
+export interface DictionariesResponse {
+  items: DictionaryRecord[];
+  platforms: DictionaryRecord[];
+  markets: DictionaryRecord[];
+  languages: DictionaryRecord[];
+}
+
+export interface ProductMasterImageRecord {
+  id: string;
+  productId: string;
+  assetId: string;
+  assetName: string;
+  assetVersionId: string;
+  versionNo: number;
+  latestVersionId: string;
+  latestVersionNo: number;
+  originalFilename: string;
+  angle: string;
+  isPrimary: boolean;
+  lockNote: string;
+  lockedAt: string;
+  unlockedAt: string | null;
+  unlockNote: string | null;
+  reviewStatus: ReviewStatus;
+  thumbStatus: ThumbStatus;
+  storageId: string;
+  storageStatus: StorageProviderStatus;
+  sha256: string;
+  sizeBytes: number;
+  mimeType: string;
+  ext: string;
+  width: number | null;
+  height: number | null;
+}
+
+export type StoreStatus = "active" | "archived";
+
+export interface StoreRecord {
+  id: string;
+  name: string;
+  platform: string;
+  market: string;
+  defaultLanguage: string;
+  status: StoreStatus;
+  notes: string;
+  listingCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type ListingStatus = "draft" | "ready" | "published" | "archived";
+export type AssetSetKind = "carousel" | "detail" | "sku" | "video";
+
+export interface ListingSkuRecord {
+  id: string;
+  listingId: string;
+  skuId: string;
+  skuCode: string;
+  skuName: string;
+  skuAttributes: Record<string, string>;
+  skuStatus: SkuStatus;
+  channelCode: string;
+  displayName: string;
+  position: number;
+}
+
+export interface ListingSummary {
+  id: string;
+  productId: string;
+  productSpu: string;
+  productNameZh: string;
+  productNameEn: string;
+  storeId: string;
+  storeName: string;
+  platform: string;
+  market: string;
+  displayName: string;
+  language: string;
+  externalId: string | null;
+  externalUrl: string | null;
+  status: ListingStatus;
+  notes: string;
+  skuCount: number;
+  carouselCount: number;
+  detailCount: number;
+  skuImageCount: number;
+  videoCount: number;
+  pdpVersionCount: number;
+  pdpTitle: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface ListingDetail extends ListingSummary {
+  skus: ListingSkuRecord[];
+}
+
+export interface AssetSetItemRecord {
+  id: string;
+  setId: string;
+  kind: AssetSetKind;
+  position: number;
+  assetVersionId: string;
+  assetId: string;
+  assetName: string;
+  assetType: AssetType;
+  assetDeleted: boolean;
+  originalFilename: string;
+  versionNo: number;
+  latestVersionId: string;
+  latestVersionNo: number;
+  hasNewerVersion: boolean;
+  reviewStatus: ReviewStatus;
+  reviewNote: string;
+  thumbStatus: ThumbStatus;
+  storageId: string;
+  storageStatus: StorageProviderStatus;
+  sha256: string;
+  sizeBytes: number;
+  mimeType: string;
+  ext: string;
+  width: number | null;
+  height: number | null;
+  durationMs: number | null;
+  listingSkuId: string | null;
+  skuCode: string | null;
+  skuChannelCode: string | null;
+  skuDisplayName: string | null;
+  isDuplicateVersion: boolean;
+  isDuplicateAsset: boolean;
+  createdAt: string;
+}
+
+export interface ListingAssetSetsResponse {
+  listingId: string;
+  sets: Record<
+    AssetSetKind,
+    {
+      id: string;
+      kind: AssetSetKind;
+      updatedAt: string;
+      items: AssetSetItemRecord[];
+    }
+  >;
+}
+
+export interface PdpSpecRow {
+  specKey: string;
+  specValue: string;
+  unit: string;
+}
+
+export interface PdpContent {
+  title: string;
+  shortDescription: string;
+  bullets: string[];
+  fullDescription: string;
+  specs: PdpSpecRow[];
+  packageList: string;
+  usageInstructions: string;
+  seoKeywords: string;
+  notes: string;
+}
+
+export interface PdpDraftRecord {
+  listingId: string;
+  language: string;
+  content: PdpContent;
+  revision: number;
+  basedOnVersionId: string | null;
+  titleCodePoints: number;
+  titleUtf8Bytes: number;
+  updatedAt: string;
+}
+
+export interface PdpVersionRecord {
+  id: string;
+  listingId: string;
+  language: string;
+  versionNo: number;
+  content: PdpContent;
+  titleCodePoints: number;
+  note: string;
+  createdAt: string;
+}
+
+export interface PdpSpecDiffItem {
+  specKey: string;
+  kind: "added_in_product" | "changed_in_product" | "only_in_pdp";
+  productValue?: string;
+  productUnit?: string;
+  pdpValue?: string;
+  pdpUnit?: string;
+}
+
+export interface ListingPdpResponse {
+  listingId: string;
+  language: string;
+  draft: PdpDraftRecord;
+  versions: PdpVersionRecord[];
+  productSpecs: PdpSpecRow[];
+  specDiff: PdpSpecDiffItem[];
 }

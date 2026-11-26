@@ -7,7 +7,7 @@ import { enqueueTrashGcJob } from "./gc.js";
 import { listTrash, restoreFromTrash } from "./service.js";
 
 const restoreSchema = z.object({
-  type: z.enum(["asset", "product"]),
+  type: z.enum(["asset", "product", "listing"]),
   ids: z.array(z.string().uuid()).min(1).max(200)
 });
 

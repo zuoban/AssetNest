@@ -18,9 +18,11 @@ import { registerBackupRoutes } from "../modules/backups/routes.js";
 import { executeBackupJob } from "../modules/backups/service.js";
 import { registerJobRoutes } from "../modules/jobs/routes.js";
 import { JobWorker } from "../modules/jobs/worker.js";
+import { registerListingRoutes } from "../modules/listings/routes.js";
 import { registerProductRoutes } from "../modules/products/routes.js";
 import {
   rebuildAssetSearchDocument,
+  rebuildListingSearchDocument,
   rebuildProductSearchDocument
 } from "../modules/search/service.js";
 import { registerStorageOpsRoutes } from "../modules/storage-ops/routes.js";
@@ -148,6 +150,8 @@ export async function createApp(options: CreateAppOptions): Promise<AppRuntime> 
       rebuildAssetSearchDocument(db, entityId);
     } else if (entityType === "product" && entityId) {
       rebuildProductSearchDocument(db, entityId);
+    } else if (entityType === "listing" && entityId) {
+      rebuildListingSearchDocument(db, entityId);
     }
     return { reindexed: true };
   });
@@ -213,6 +217,7 @@ export async function createApp(options: CreateAppOptions): Promise<AppRuntime> 
   registerProductRoutes(app, db);
   registerTaxonomyRoutes(app, db);
   registerAssetRoutes(app, db, config, storageRegistry);
+  registerListingRoutes(app, db);
   registerTrashRoutes(app, db, worker);
 
   app.all("/api/*", async () => {

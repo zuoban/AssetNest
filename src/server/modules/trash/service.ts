@@ -1,7 +1,14 @@
-import type { TrashAssetItem, TrashProductItem, TrashResponse } from "../../../shared/types.js";
+import type {
+  ListingStatus,
+  TrashAssetItem,
+  TrashListingItem,
+  TrashProductItem,
+  TrashResponse
+} from "../../../shared/types.js";
 import type { AppDatabase } from "../../db/database.js";
 import {
   rebuildAssetSearchDocument,
+  rebuildListingSearchDocument,
   rebuildProductLinkedAssetSearchDocuments,
   rebuildProductSearchDocument
 } from "../search/service.js";
@@ -77,13 +84,63 @@ export function listTrash(db: AppDatabase): TrashResponse {
     deletedAt: row.deleted_at
   }));
 
-  return { assets, products };
+  const hasListingsTable = Boolean(
+    db.raw
+      .prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'listings'")
+      .get()
+  );
+
+  const listings: TrashListingItem[] = hasListingsTable
+    ? (
+        db.raw
+          .prepare(
+            `SELECT
+               l.id, l.product_id, p.spu AS product_spu, p.name_zh AS product_name_zh,
+               l.store_id, s.name AS store_name, s.platform, s.market,
+               l.display_name, l.language, l.status, l.deleted_at
+             FROM listings l
+             JOIN products p ON p.id = l.product_id
+             JOIN stores s ON s.id = l.store_id
+             WHERE l.deleted_at IS NOT NULL
+             ORDER BY l.deleted_at DESC`
+          )
+          .all() as Array<{
+          id: string;
+          product_id: string;
+          product_spu: string;
+          product_name_zh: string;
+          store_id: string;
+          store_name: string;
+          platform: string;
+          market: string;
+          display_name: string;
+          language: string;
+          status: ListingStatus;
+          deleted_at: string;
+        }>
+      ).map((row) => ({
+        id: row.id,
+        productId: row.product_id,
+        productSpu: row.product_spu,
+        productNameZh: row.product_name_zh,
+        storeId: row.store_id,
+        storeName: row.store_name,
+        platform: row.platform,
+        market: row.market,
+        displayName: row.display_name,
+        language: row.language,
+        status: row.status,
+        deletedAt: row.deleted_at
+      }))
+    : [];
+
+  return { assets, products, listings };
 }
 
 export function restoreFromTrash(
   db: AppDatabase,
   actorUserId: string,
-  input: { type: "asset" | "product"; ids: string[] }
+  input: { type: "asset" | "product" | "listing"; ids: string[] }
 ): { restoredCount: number } {
   const uniqueIds = Array.from(new Set(input.ids));
   if (uniqueIds.length === 0) {
@@ -105,7 +162,7 @@ export function restoreFromTrash(
           rebuildAssetSearchDocument(db, id);
         }
       }
-    } else {
+    } else if (input.type === "product") {
       const stmt = db.raw.prepare(
         "UPDATE products SET deleted_at = NULL, updated_at = ? WHERE id = ? AND deleted_at IS NOT NULL"
       );
@@ -115,6 +172,17 @@ export function restoreFromTrash(
           restoredCount += 1;
           rebuildProductSearchDocument(db, id);
           rebuildProductLinkedAssetSearchDocuments(db, id);
+        }
+      }
+    } else {
+      const stmt = db.raw.prepare(
+        "UPDATE listings SET deleted_at = NULL, updated_at = ? WHERE id = ? AND deleted_at IS NOT NULL"
+      );
+      for (const id of uniqueIds) {
+        const res = stmt.run(now, id);
+        if (res.changes > 0) {
+          restoredCount += 1;
+          rebuildListingSearchDocument(db, id);
         }
       }
     }

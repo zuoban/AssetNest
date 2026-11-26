@@ -44,7 +44,7 @@ function hasProtectedVersionReferences(db: AppDatabase, assetId: string): boolea
 
   const protectedChecks: Array<{ table: string; column: string }> = [
     { table: "release_assets", column: "asset_version_id" },
-    { table: "listing_assets", column: "asset_version_id" },
+    { table: "asset_set_items", column: "asset_version_id" },
     { table: "product_master_images", column: "asset_version_id" }
   ];
 
@@ -66,6 +66,14 @@ function hasProtectedVersionReferences(db: AppDatabase, assetId: string): boolea
 }
 
 function hasProtectedProductReferences(db: AppDatabase, productId: string): boolean {
+  if (tableExists(db, "product_master_images")) {
+    const ref = db.raw
+      .prepare("SELECT 1 AS ok FROM product_master_images WHERE product_id = ? LIMIT 1")
+      .get(productId) as { ok: number } | undefined;
+    if (ref) {
+      return true;
+    }
+  }
   if (tableExists(db, "listings")) {
     const ref = db.raw
       .prepare("SELECT 1 AS ok FROM listings WHERE product_id = ? LIMIT 1")

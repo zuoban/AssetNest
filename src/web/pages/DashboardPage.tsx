@@ -22,7 +22,19 @@ const ACTION_LABELS: Record<string, string> = {
   "asset.update": "更新素材元数据",
   "asset.batch": "批量处理素材",
   "asset.regenerate_thumbnail": "重建素材缩略图",
-  "trash.restore": "从回收站恢复数据"
+  "trash.restore": "从回收站恢复数据",
+  "asset.version_append": "上传素材新版本",
+  "asset.version_switch": "切换素材当前版本",
+  "asset.version_review": "审核素材版本",
+  "product.master_lock": "锁定商品母图",
+  "product.master_primary": "切换商品主母图",
+  "product.master_unlock": "解除/替换商品母图",
+  "store.create": "创建店铺",
+  "store.update": "更新店铺",
+  "listing.create": "创建上架链接",
+  "listing.duplicate": "复制上架链接",
+  "listing.asset_set_update": "更新上架素材组",
+  "listing.pdp_version_create": "固化 PDP 文案版本"
 };
 
 export function DashboardPage() {
@@ -52,7 +64,7 @@ export function DashboardPage() {
         { label: "商品档案", value: data.counts.products, hint: "未软删除商品数", to: "/products" },
         { label: "数字素材", value: data.counts.assets, hint: "未软删除素材数", to: "/assets" },
         { label: "待审核版本", value: data.counts.pendingReviews, hint: "按素材版本统计", to: "/assets" },
-        { label: "上架草稿", value: data.counts.draftListings, hint: "草稿状态 Listing", to: null },
+        { label: "上架草稿", value: data.counts.draftListings, hint: "草稿状态 Listing", to: "/listings?status=draft" },
         { label: "执行中任务", value: data.counts.runningJobs, hint: "排队与运行中", to: "/jobs" },
         { label: "失败任务", value: data.counts.failedJobs, hint: "需关注重试", to: "/jobs" }
       ]
@@ -74,6 +86,12 @@ export function DashboardPage() {
           >
             <Package className="h-3.5 w-3.5" />
             <span>商品中心</span>
+          </Link>
+          <Link
+            to="/listings"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-gray-200 bg-white px-3 py-1.5 text-xs font-medium text-gray-700 hover:bg-gray-50"
+          >
+            <span>上架工作台</span>
           </Link>
           <Link
             to="/assets"

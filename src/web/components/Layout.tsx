@@ -6,10 +6,12 @@ import {
   HardDrive,
   Images,
   LayoutDashboard,
+  Layers,
   LogOut,
   Menu,
   Package,
   Settings,
+  Store,
   Trash2,
   X
 } from "lucide-react";
@@ -24,7 +26,9 @@ interface LayoutProps {
 const NAV_ITEMS = [
   { to: "/", label: "工作台", icon: LayoutDashboard, end: true },
   { to: "/products", label: "商品中心", icon: Package, end: false },
+  { to: "/listings", label: "上架工作台", icon: Layers, end: false },
   { to: "/assets", label: "全部素材", icon: Images, end: false },
+  { to: "/stores", label: "店铺与字典", icon: Store, end: false },
   { to: "/trash", label: "回收站", icon: Trash2, end: false },
   { to: "/storage", label: "存储管理", icon: HardDrive, end: false },
   { to: "/jobs", label: "任务与审计", icon: Activity, end: false },

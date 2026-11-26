@@ -3,6 +3,12 @@ import { z } from "zod";
 import type { AppDatabase } from "../../db/database.js";
 import { createRequireAuthHook } from "../../http/security.js";
 import {
+  listProductMasterImages,
+  lockProductMasterImage,
+  setPrimaryMasterImage,
+  unlockProductMasterImage
+} from "./master-images.js";
+import {
   createProduct,
   createSku,
   deleteSku,
@@ -25,7 +31,9 @@ const appearanceConstraintsSchema = z.object({
   proportion: z.string().max(1000).optional(),
   color: z.string().max(1000).optional(),
   dimensions: z.string().max(1000).optional(),
-  forbiddenChanges: z.string().max(1000).optional()
+  forbiddenChanges: z.string().max(1000).optional(),
+  referenceNotes: z.string().max(2000).optional(),
+  referenceAssetVersionIds: z.array(z.string().uuid()).max(20).optional()
 });
 
 const listProductsQuerySchema = z.object({
@@ -83,6 +91,20 @@ const updateSkuSchema = z.object({
   status: z.enum(["active", "inactive"]).optional()
 });
 
+const lockMasterImageSchema = z.object({
+  assetVersionId: z.string().uuid(),
+  angle: z.string().trim().min(1).max(60).default("front"),
+  isPrimary: z.boolean().optional(),
+  lockNote: z.string().max(500).optional()
+});
+
+const unlockMasterImageSchema = z.object({
+  unlockNote: z.string().trim().min(1, "请填写解除或替换母图的原因备注").max(500),
+  replacementAssetVersionId: z.string().uuid().optional(),
+  replacementAngle: z.string().trim().min(1).max(60).optional(),
+  replacementLockNote: z.string().max(500).optional()
+});
+
 export function registerProductRoutes(app: FastifyInstance, db: AppDatabase): void {
   const requireAuth = createRequireAuthHook(db);
 
@@ -136,6 +158,49 @@ export function registerProductRoutes(app: FastifyInstance, db: AppDatabase): vo
     async (request) => {
       const { id, skuId } = request.params as { id: string; skuId: string };
       return deleteSku(db, request.authUser!.id, id, skuId);
+    }
+  );
+
+  app.get("/api/v1/products/:id/master-images", { preHandler: requireAuth }, async (request) => {
+    const { id } = request.params as { id: string };
+    const query = z
+      .object({
+        includeHistory: z
+          .union([z.boolean(), z.enum(["true", "false", "1", "0"])])
+          .optional()
+          .transform((val) => val === true || val === "true" || val === "1")
+      })
+      .parse(request.query);
+    return { items: listProductMasterImages(db, id, query.includeHistory) };
+  });
+
+  app.post(
+    "/api/v1/products/:id/master-images",
+    { preHandler: requireAuth },
+    async (request, reply) => {
+      const { id } = request.params as { id: string };
+      const body = lockMasterImageSchema.parse(request.body);
+      const created = lockProductMasterImage(db, request.authUser!.id, id, body);
+      return reply.status(201).send(created);
+    }
+  );
+
+  app.post(
+    "/api/v1/products/:id/master-images/:masterId/primary",
+    { preHandler: requireAuth },
+    async (request) => {
+      const { id, masterId } = request.params as { id: string; masterId: string };
+      return setPrimaryMasterImage(db, request.authUser!.id, id, masterId);
+    }
+  );
+
+  app.post(
+    "/api/v1/products/:id/master-images/:masterId/unlock",
+    { preHandler: requireAuth },
+    async (request) => {
+      const { id, masterId } = request.params as { id: string; masterId: string };
+      const body = unlockMasterImageSchema.parse(request.body);
+      return unlockProductMasterImage(db, request.authUser!.id, id, masterId, body);
     }
   );
 }

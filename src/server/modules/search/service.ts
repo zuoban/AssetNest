@@ -177,6 +177,89 @@ export function rebuildProductLinkedAssetSearchDocuments(db: AppDatabase, produc
   }
 }
 
+export function rebuildListingSearchDocument(db: AppDatabase, listingId: string): void {
+  const exists = db.raw
+    .prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'listings'")
+    .get() as { ok: number } | undefined;
+  if (!exists) {
+    return;
+  }
+
+  const row = db.raw
+    .prepare(
+      `SELECT
+         l.id, l.display_name, l.language, l.external_id, l.notes, l.deleted_at,
+         p.spu, p.name_zh, p.name_en,
+         s.name AS store_name, s.platform, s.market,
+         d.content_json
+       FROM listings l
+       JOIN products p ON p.id = l.product_id
+       JOIN stores s ON s.id = l.store_id
+       LEFT JOIN listing_pdp_drafts d ON d.listing_id = l.id
+       WHERE l.id = ?`
+    )
+    .get(listingId) as
+    | {
+        id: string;
+        display_name: string;
+        language: string;
+        external_id: string | null;
+        notes: string;
+        deleted_at: string | null;
+        spu: string;
+        name_zh: string;
+        name_en: string;
+        store_name: string;
+        platform: string;
+        market: string;
+        content_json: string | null;
+      }
+    | undefined;
+
+  if (!row || row.deleted_at !== null) {
+    removeSearchDocument(db, "listing", listingId);
+    return;
+  }
+
+  let pdpParts: string[] = [];
+  if (row.content_json) {
+    try {
+      const pdp = JSON.parse(row.content_json) as {
+        title?: string;
+        shortDescription?: string;
+        bullets?: string[];
+        fullDescription?: string;
+        seoKeywords?: string;
+      };
+      pdpParts = [
+        pdp.title ?? "",
+        pdp.shortDescription ?? "",
+        ...(Array.isArray(pdp.bullets) ? pdp.bullets : []),
+        pdp.fullDescription ?? "",
+        pdp.seoKeywords ?? ""
+      ];
+    } catch {
+      // ignore malformed json
+    }
+  }
+
+  const parts = [
+    row.display_name,
+    row.language,
+    row.external_id ?? "",
+    row.notes,
+    row.spu,
+    row.name_zh,
+    row.name_en,
+    row.store_name,
+    row.platform,
+    row.market,
+    ...pdpParts
+  ];
+
+  upsertSearchDocument(db, "listing", listingId, parts.filter(Boolean).join(" "));
+}
+
 function escapeFtsPhrase(term: string): string {
   return `"${term.replace(/"/g, '""')}"`;
 }

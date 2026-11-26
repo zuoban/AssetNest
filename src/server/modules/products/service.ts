@@ -493,7 +493,13 @@ export function softDeleteProduct(
 ): {
   id: string;
   deletedAt: string;
-  impact: { skuCount: number; linkedAssetCount: number; warning: string | null };
+  impact: {
+    skuCount: number;
+    linkedAssetCount: number;
+    listingCount: number;
+    masterImageCount: number;
+    warning: string | null;
+  };
 } {
   const existing = db.raw
     .prepare("SELECT id, spu, name_zh FROM products WHERE id = ? AND deleted_at IS NULL")
@@ -519,6 +525,35 @@ export function softDeleteProduct(
       .get(productId) as { count: number }
   ).count;
 
+  const hasListingsTable = Boolean(
+    db.raw
+      .prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'listings'")
+      .get()
+  );
+  const listingCount = hasListingsTable
+    ? (
+        db.raw
+          .prepare("SELECT COUNT(*) AS count FROM listings WHERE product_id = ? AND deleted_at IS NULL")
+          .get(productId) as { count: number }
+      ).count
+    : 0;
+  const hasMasterTable = Boolean(
+    db.raw
+      .prepare(
+        "SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'product_master_images'"
+      )
+      .get()
+  );
+  const masterImageCount = hasMasterTable
+    ? (
+        db.raw
+          .prepare(
+            "SELECT COUNT(*) AS count FROM product_master_images WHERE product_id = ? AND unlocked_at IS NULL"
+          )
+          .get(productId) as { count: number }
+      ).count
+    : 0;
+
   const deletedAt = new Date().toISOString();
   db.transaction(() => {
     db.raw
@@ -531,13 +566,13 @@ export function softDeleteProduct(
       action: "product.soft_delete",
       objectType: "product",
       objectId: productId,
-      details: { spu: existing.spu, skuCount, linkedAssetCount }
+      details: { spu: existing.spu, skuCount, linkedAssetCount, listingCount, masterImageCount }
     });
   });
 
   const warning =
-    skuCount > 0 || linkedAssetCount > 0
-      ? `该商品包含 ${skuCount} 个 SKU 并关联 ${linkedAssetCount} 条素材；已软删除至回收站，恢复后将保留全部关联。`
+    skuCount > 0 || linkedAssetCount > 0 || listingCount > 0 || masterImageCount > 0
+      ? `该商品包含 ${skuCount} 个 SKU、${linkedAssetCount} 条素材、${masterImageCount} 张锁定母图与 ${listingCount} 条上架链接；已软删除至回收站，恢复后将保留全部关联。`
       : null;
 
   return {
@@ -546,6 +581,8 @@ export function softDeleteProduct(
     impact: {
       skuCount,
       linkedAssetCount,
+      listingCount,
+      masterImageCount,
       warning
     }
   };
@@ -707,6 +744,24 @@ export function deleteSku(
 
   if (!existing) {
     throw new AppError(404, "NOT_FOUND", "SKU 不存在");
+  }
+
+  const hasListingSkus = Boolean(
+    db.raw
+      .prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'listing_skus'")
+      .get()
+  );
+  if (hasListingSkus) {
+    const ref = db.raw
+      .prepare("SELECT COUNT(*) AS count FROM listing_skus WHERE sku_id = ?")
+      .get(skuId) as { count: number };
+    if (Number(ref.count) > 0) {
+      throw new AppError(
+        409,
+        "CONFLICT",
+        `SKU "${existing.code}" 已被 ${ref.count} 条上架链接引用，无法直接删除；请先从对应 Listing 移除或改为停用`
+      );
+    }
   }
 
   db.transaction(() => {

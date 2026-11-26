@@ -5,18 +5,31 @@ import type {
   AppearanceConstraints,
   AssetDetail,
   AssetListItem,
+  AssetSetKind,
   AssetType,
+  AssetVersionRecord,
   AuthMeResponse,
   BackupKind,
   BackupRecord,
   CacheClearResult,
   DashboardResponse,
+  DictionariesResponse,
+  DictionaryCategory,
+  DictionaryRecord,
   FolderRecord,
   JobRecord,
+  ListingAssetSetsResponse,
+  ListingDetail,
+  ListingPdpResponse,
+  ListingStatus,
+  ListingSummary,
   MigrationPreviewResponse,
   MigrationScopeInput,
   PaginatedResponse,
+  PdpContent,
+  PdpVersionRecord,
   ProductDetail,
+  ProductMasterImageRecord,
   ProductSpec,
   ProductStatus,
   ProductSummary,
@@ -28,6 +41,8 @@ import type {
   StorageCleanupQueueResponse,
   StorageProviderSummary,
   StorageTestResponse,
+  StoreRecord,
+  StoreStatus,
   TagDimension,
   TagRecord,
   TrashResponse,
@@ -268,6 +283,7 @@ export const api = {
   listAssets(params: {
     q?: string;
     productId?: string;
+    storeId?: string;
     market?: string;
     platform?: string;
     purpose?: string;
@@ -288,6 +304,7 @@ export const api = {
     const qs = new URLSearchParams();
     if (params.q) qs.set("q", params.q);
     if (params.productId) qs.set("productId", params.productId);
+    if (params.storeId) qs.set("storeId", params.storeId);
     if (params.market) qs.set("market", params.market);
     if (params.platform) qs.set("platform", params.platform);
     if (params.purpose) qs.set("purpose", params.purpose);
@@ -382,6 +399,100 @@ export const api = {
       body: form
     });
   },
+  appendAssetVersion(
+    assetId: string,
+    file: File,
+    options: {
+      storageId?: string;
+      changeNote?: string;
+      promptText?: string;
+      referenceAssetVersionId?: string;
+      setAsCurrent?: boolean;
+    } = {}
+  ): Promise<{ asset: AssetDetail; version: AssetVersionRecord; deduplicated: boolean }> {
+    const form = new FormData();
+    if (options.storageId) form.append("storageId", options.storageId);
+    if (options.changeNote) form.append("changeNote", options.changeNote);
+    if (options.promptText) form.append("promptText", options.promptText);
+    if (options.referenceAssetVersionId) {
+      form.append("referenceAssetVersionId", options.referenceAssetVersionId);
+    }
+    if (options.setAsCurrent !== undefined) {
+      form.append("setAsCurrent", options.setAsCurrent ? "true" : "false");
+    }
+    form.append("file", file, file.name);
+    return requestJson(`/api/v1/assets/${encodeURIComponent(assetId)}/versions`, {
+      method: "POST",
+      body: form
+    });
+  },
+  switchAssetCurrentVersion(assetId: string, versionId: string): Promise<AssetDetail> {
+    return requestJson(`/api/v1/assets/${encodeURIComponent(assetId)}/current-version`, {
+      method: "POST",
+      body: JSON.stringify({ versionId })
+    });
+  },
+  reviewAssetVersion(
+    versionId: string,
+    payload: { reviewStatus: ReviewStatus; reviewNote?: string }
+  ): Promise<AssetVersionRecord> {
+    return requestJson(`/api/v1/asset-versions/${encodeURIComponent(versionId)}/review`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  },
+  listProductMasterImages(
+    productId: string,
+    includeHistory = false
+  ): Promise<{ items: ProductMasterImageRecord[] }> {
+    return requestJson(
+      `/api/v1/products/${encodeURIComponent(productId)}/master-images${includeHistory ? "?includeHistory=1" : ""}`
+    );
+  },
+  lockProductMasterImage(
+    productId: string,
+    payload: {
+      assetVersionId: string;
+      angle: string;
+      isPrimary?: boolean;
+      lockNote?: string;
+    }
+  ): Promise<ProductMasterImageRecord> {
+    return requestJson(`/api/v1/products/${encodeURIComponent(productId)}/master-images`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  },
+  setPrimaryMasterImage(
+    productId: string,
+    masterId: string
+  ): Promise<ProductMasterImageRecord> {
+    return requestJson(
+      `/api/v1/products/${encodeURIComponent(productId)}/master-images/${encodeURIComponent(masterId)}/primary`,
+      {
+        method: "POST",
+        body: JSON.stringify({})
+      }
+    );
+  },
+  unlockProductMasterImage(
+    productId: string,
+    masterId: string,
+    payload: {
+      unlockNote: string;
+      replacementAssetVersionId?: string;
+      replacementAngle?: string;
+      replacementLockNote?: string;
+    }
+  ): Promise<{ unlocked: ProductMasterImageRecord; replacement: ProductMasterImageRecord | null }> {
+    return requestJson(
+      `/api/v1/products/${encodeURIComponent(productId)}/master-images/${encodeURIComponent(masterId)}/unlock`,
+      {
+        method: "POST",
+        body: JSON.stringify(payload)
+      }
+    );
+  },
   regenerateThumbnail(
     assetId: string,
     versionId: string
@@ -400,7 +511,10 @@ export const api = {
   getTrash(): Promise<TrashResponse> {
     return requestJson("/api/v1/trash");
   },
-  restoreTrash(type: "asset" | "product", ids: string[]): Promise<{ restoredCount: number }> {
+  restoreTrash(
+    type: "asset" | "product" | "listing",
+    ids: string[]
+  ): Promise<{ restoredCount: number }> {
     return requestJson("/api/v1/trash/restore", {
       method: "POST",
       body: JSON.stringify({ type, ids })
@@ -498,5 +612,232 @@ export const api = {
   },
   backupDownloadUrl(backupId: string): string {
     return `/api/v1/backups/${encodeURIComponent(backupId)}/download`;
+  },
+  getDictionaries(params: {
+    category?: DictionaryCategory;
+    activeOnly?: boolean;
+  } = {}): Promise<DictionariesResponse> {
+    const qs = new URLSearchParams();
+    if (params.category) qs.set("category", params.category);
+    if (params.activeOnly) qs.set("activeOnly", "1");
+    const query = qs.toString();
+    return requestJson(`/api/v1/dictionaries${query ? `?${query}` : ""}`);
+  },
+  upsertDictionary(payload: {
+    category: DictionaryCategory;
+    code: string;
+    label: string;
+    isActive?: boolean;
+    position?: number;
+  }): Promise<DictionaryRecord> {
+    return requestJson("/api/v1/dictionaries", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  },
+  updateDictionary(
+    category: DictionaryCategory,
+    code: string,
+    payload: {
+      label?: string;
+      isActive?: boolean;
+      position?: number;
+    }
+  ): Promise<DictionaryRecord> {
+    return requestJson(
+      `/api/v1/dictionaries/${encodeURIComponent(category)}/${encodeURIComponent(code)}`,
+      {
+        method: "PATCH",
+        body: JSON.stringify(payload)
+      }
+    );
+  },
+  listStores(params: {
+    q?: string;
+    platform?: string;
+    market?: string;
+    status?: StoreStatus;
+  } = {}): Promise<{ items: StoreRecord[] }> {
+    const qs = new URLSearchParams();
+    if (params.q) qs.set("q", params.q);
+    if (params.platform) qs.set("platform", params.platform);
+    if (params.market) qs.set("market", params.market);
+    if (params.status) qs.set("status", params.status);
+    const query = qs.toString();
+    return requestJson(`/api/v1/stores${query ? `?${query}` : ""}`);
+  },
+  createStore(payload: {
+    name: string;
+    platform: string;
+    market: string;
+    defaultLanguage: string;
+    status?: StoreStatus;
+    notes?: string;
+  }): Promise<StoreRecord> {
+    return requestJson("/api/v1/stores", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  },
+  updateStore(
+    id: string,
+    payload: {
+      name?: string;
+      platform?: string;
+      market?: string;
+      defaultLanguage?: string;
+      status?: StoreStatus;
+      notes?: string;
+    }
+  ): Promise<StoreRecord> {
+    return requestJson(`/api/v1/stores/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    });
+  },
+  deleteStore(id: string): Promise<{ deleted: boolean; id: string }> {
+    return requestJson(`/api/v1/stores/${encodeURIComponent(id)}`, {
+      method: "DELETE"
+    });
+  },
+  listListings(params: {
+    q?: string;
+    productId?: string;
+    storeId?: string;
+    platform?: string;
+    market?: string;
+    status?: ListingStatus;
+    page?: number;
+    pageSize?: number;
+  } = {}): Promise<PaginatedResponse<ListingSummary>> {
+    const qs = new URLSearchParams();
+    if (params.q) qs.set("q", params.q);
+    if (params.productId) qs.set("productId", params.productId);
+    if (params.storeId) qs.set("storeId", params.storeId);
+    if (params.platform) qs.set("platform", params.platform);
+    if (params.market) qs.set("market", params.market);
+    if (params.status) qs.set("status", params.status);
+    if (params.page) qs.set("page", String(params.page));
+    if (params.pageSize) qs.set("pageSize", String(params.pageSize));
+    const query = qs.toString();
+    return requestJson(`/api/v1/listings${query ? `?${query}` : ""}`);
+  },
+  createListing(payload: {
+    productId: string;
+    storeId: string;
+    displayName: string;
+    language?: string;
+    externalId?: string | null;
+    externalUrl?: string | null;
+    status?: ListingStatus;
+    notes?: string;
+    skuIds?: string[];
+  }): Promise<ListingDetail> {
+    return requestJson("/api/v1/listings", {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  },
+  getListing(id: string): Promise<ListingDetail> {
+    return requestJson(`/api/v1/listings/${encodeURIComponent(id)}`);
+  },
+  updateListing(
+    id: string,
+    payload: {
+      displayName?: string;
+      language?: string;
+      externalId?: string | null;
+      externalUrl?: string | null;
+      status?: ListingStatus;
+      notes?: string;
+    }
+  ): Promise<ListingDetail> {
+    return requestJson(`/api/v1/listings/${encodeURIComponent(id)}`, {
+      method: "PATCH",
+      body: JSON.stringify(payload)
+    });
+  },
+  deleteListing(id: string): Promise<{ id: string; deletedAt: string }> {
+    return requestJson(`/api/v1/listings/${encodeURIComponent(id)}`, {
+      method: "DELETE"
+    });
+  },
+  duplicateListing(
+    id: string,
+    payload: {
+      storeId?: string;
+      displayName?: string;
+      language?: string;
+    } = {}
+  ): Promise<ListingDetail> {
+    return requestJson(`/api/v1/listings/${encodeURIComponent(id)}/duplicate`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  },
+  syncListingSkus(
+    id: string,
+    items: Array<{ skuId: string; channelCode?: string; displayName?: string }>
+  ): Promise<ListingDetail> {
+    return requestJson(`/api/v1/listings/${encodeURIComponent(id)}/skus`, {
+      method: "PUT",
+      body: JSON.stringify({ items })
+    });
+  },
+  getListingAssetSets(id: string): Promise<ListingAssetSetsResponse> {
+    return requestJson(`/api/v1/listings/${encodeURIComponent(id)}/asset-sets`);
+  },
+  replaceListingAssetSet(
+    id: string,
+    kind: AssetSetKind,
+    items: Array<{ assetVersionId: string; listingSkuId?: string | null }>
+  ): Promise<ListingAssetSetsResponse> {
+    return requestJson(`/api/v1/listings/${encodeURIComponent(id)}/asset-sets/${kind}`, {
+      method: "PUT",
+      body: JSON.stringify({ items })
+    });
+  },
+  getListingPdp(id: string): Promise<ListingPdpResponse> {
+    return requestJson(`/api/v1/listings/${encodeURIComponent(id)}/pdp`);
+  },
+  saveListingPdpDraft(
+    id: string,
+    payload: { language?: string; content: PdpContent }
+  ): Promise<ListingPdpResponse> {
+    return requestJson(`/api/v1/listings/${encodeURIComponent(id)}/pdp/draft`, {
+      method: "PUT",
+      body: JSON.stringify(payload)
+    });
+  },
+  createListingPdpVersion(
+    id: string,
+    payload: { note?: string } = {}
+  ): Promise<{ version: PdpVersionRecord; pdp: ListingPdpResponse }> {
+    return requestJson(`/api/v1/listings/${encodeURIComponent(id)}/pdp/versions`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
+  },
+  restoreListingPdpVersion(id: string, versionId: string): Promise<ListingPdpResponse> {
+    return requestJson(
+      `/api/v1/listings/${encodeURIComponent(id)}/pdp/restore/${encodeURIComponent(versionId)}`,
+      {
+        method: "POST",
+        body: JSON.stringify({})
+      }
+    );
+  },
+  copyListingPdpTo(
+    id: string,
+    payload: {
+      targetListingId: string;
+      versionId?: string;
+      keepTargetLanguage?: boolean;
+    }
+  ): Promise<ListingPdpResponse> {
+    return requestJson(`/api/v1/listings/${encodeURIComponent(id)}/pdp/copy-to`, {
+      method: "POST",
+      body: JSON.stringify(payload)
+    });
   }
 };

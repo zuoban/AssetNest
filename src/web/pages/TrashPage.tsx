@@ -4,6 +4,7 @@ import {
   AlertCircle,
   CheckCircle2,
   Image as ImageIcon,
+  Layers,
   Package,
   RefreshCw,
   RotateCcw,
@@ -22,9 +23,10 @@ export function TrashPage() {
   const [restoring, setRestoring] = useState(false);
   const [runningGc, setRunningGc] = useState(false);
   const [forceImmediateGc, setForceImmediateGc] = useState(false);
-  const [tab, setTab] = useState<"assets" | "products">("assets");
+  const [tab, setTab] = useState<"assets" | "products" | "listings">("assets");
   const [selectedAssetIds, setSelectedAssetIds] = useState<Set<string>>(new Set());
   const [selectedProductIds, setSelectedProductIds] = useState<Set<string>>(new Set());
+  const [selectedListingIds, setSelectedListingIds] = useState<Set<string>>(new Set());
 
   const loadTrash = useCallback(async () => {
     setLoading(true);
@@ -34,6 +36,7 @@ export function TrashPage() {
       setData(res);
       setSelectedAssetIds(new Set());
       setSelectedProductIds(new Set());
+      setSelectedListingIds(new Set());
     } catch (err) {
       setError(err instanceof Error ? err.message : "加载回收站失败");
     } finally {
@@ -45,15 +48,16 @@ export function TrashPage() {
     void loadTrash();
   }, [loadTrash]);
 
-  const handleRestore = async (type: "asset" | "product", ids: string[]) => {
+  const handleRestore = async (type: "asset" | "product" | "listing", ids: string[]) => {
     if (ids.length === 0) return;
     setRestoring(true);
     setError(null);
     setNotice(null);
     try {
       const res = await api.restoreTrash(type, ids);
+      const label = type === "asset" ? "素材" : type === "product" ? "商品" : "上架链接";
       setNotice(
-        `已恢复 ${res.restoredCount} 项${type === "asset" ? "素材" : "商品"}，并保留原有商品/标签关联关系与搜索索引`
+        `已恢复 ${res.restoredCount} 项${label}，并保留原有商品/标签关联关系与搜索索引`
       );
       await loadTrash();
     } catch (err) {
@@ -85,6 +89,7 @@ export function TrashPage() {
 
   const assets = data?.assets ?? [];
   const products = data?.products ?? [];
+  const listings = data?.listings ?? [];
 
   return (
     <div className="space-y-4">
@@ -178,6 +183,17 @@ export function TrashPage() {
           >
             已删除商品 ({products.length})
           </button>
+          <button
+            type="button"
+            onClick={() => setTab("listings")}
+            className={`border-b-2 px-4 py-2.5 text-xs font-medium ${
+              tab === "listings"
+                ? "border-blue-600 text-blue-600"
+                : "border-transparent text-gray-500 hover:text-gray-800"
+            }`}
+          >
+            已删除上架链接 ({listings.length})
+          </button>
         </div>
 
         {tab === "assets" && selectedAssetIds.size > 0 && (
@@ -200,6 +216,17 @@ export function TrashPage() {
           >
             <RotateCcw className="h-3.5 w-3.5" />
             <span>批量恢复 ({selectedProductIds.size})</span>
+          </button>
+        )}
+        {tab === "listings" && selectedListingIds.size > 0 && (
+          <button
+            type="button"
+            disabled={restoring}
+            onClick={() => void handleRestore("listing", Array.from(selectedListingIds))}
+            className="mb-1 inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+          >
+            <RotateCcw className="h-3.5 w-3.5" />
+            <span>批量恢复 ({selectedListingIds.size})</span>
           </button>
         )}
       </div>
@@ -293,7 +320,8 @@ export function TrashPage() {
             </table>
           </div>
         )
-      ) : products.length === 0 ? (
+      ) : tab === "products" ? (
+        products.length === 0 ? (
         <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-gray-300 bg-white py-14 text-center">
           <Package className="h-8 w-8 text-gray-300" />
           <p className="mt-2 text-xs text-gray-500">回收站中暂无已删除商品</p>
@@ -355,6 +383,83 @@ export function TrashPage() {
                       type="button"
                       disabled={restoring}
                       onClick={() => void handleRestore("product", [prod.id])}
+                      className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] font-medium text-blue-700 hover:bg-blue-100 disabled:opacity-50"
+                    >
+                      <RotateCcw className="h-3 w-3" />
+                      <span>恢复</span>
+                    </button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        )
+      ) : listings.length === 0 ? (
+        <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-gray-300 bg-white py-14 text-center">
+          <Layers className="h-8 w-8 text-gray-300" />
+          <p className="mt-2 text-xs text-gray-500">回收站中暂无已删除上架链接</p>
+        </div>
+      ) : (
+        <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white">
+          <table className="w-full border-collapse text-left text-xs">
+            <thead>
+              <tr className="border-b border-gray-200 bg-gray-50 text-[11px] font-medium text-gray-500">
+                <th className="w-10 px-3.5 py-2.5">
+                  <input
+                    type="checkbox"
+                    checked={selectedListingIds.size === listings.length && listings.length > 0}
+                    onChange={(e) =>
+                      setSelectedListingIds(
+                        e.target.checked ? new Set(listings.map((l) => l.id)) : new Set()
+                      )
+                    }
+                  />
+                </th>
+                <th className="px-3.5 py-2.5">上架链接名称</th>
+                <th className="px-3.5 py-2.5">所属商品 / 店铺渠道</th>
+                <th className="px-3.5 py-2.5">删除时间</th>
+                <th className="px-3.5 py-2.5 text-right">操作</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-gray-100">
+              {listings.map((item) => (
+                <tr key={item.id} className="hover:bg-gray-50">
+                  <td className="px-3.5 py-2.5">
+                    <input
+                      type="checkbox"
+                      checked={selectedListingIds.has(item.id)}
+                      onChange={() =>
+                        setSelectedListingIds((prev) => {
+                          const next = new Set(prev);
+                          if (next.has(item.id)) next.delete(item.id);
+                          else next.add(item.id);
+                          return next;
+                        })
+                      }
+                    />
+                  </td>
+                  <td className="px-3.5 py-2.5">
+                    <div className="font-medium text-gray-900">{item.displayName}</div>
+                    <div className="font-mono-tabular text-[11px] text-gray-400">
+                      {item.platform} · {item.market} · {item.language.toUpperCase()}
+                    </div>
+                  </td>
+                  <td className="px-3.5 py-2.5 text-gray-600">
+                    <div>
+                      <span className="font-mono-tabular text-gray-500">{item.productSpu}</span> ·{" "}
+                      {item.productNameZh}
+                    </div>
+                    <div className="text-[11px] text-gray-400">店铺：{item.storeName}</div>
+                  </td>
+                  <td className="font-mono-tabular px-3.5 py-2.5 text-gray-400">
+                    {formatDateTime(item.deletedAt)}
+                  </td>
+                  <td className="px-3.5 py-2.5 text-right">
+                    <button
+                      type="button"
+                      disabled={restoring}
+                      onClick={() => void handleRestore("listing", [item.id])}
                       className="inline-flex items-center gap-1 rounded-lg border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] font-medium text-blue-700 hover:bg-blue-100 disabled:opacity-50"
                     >
                       <RotateCcw className="h-3 w-3" />

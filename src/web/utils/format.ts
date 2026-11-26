@@ -1,4 +1,9 @@
-import type { ProductStatus, ReviewStatus, TagDimension } from "../../shared/types";
+import type {
+  ListingStatus,
+  ProductStatus,
+  ReviewStatus,
+  TagDimension
+} from "../../shared/types";
 
 export function formatBytes(bytes: number): string {
   if (!Number.isFinite(bytes) || bytes < 0) return "0 B";
@@ -46,6 +51,39 @@ export const PRODUCT_STATUS_META: Record<ProductStatus, { label: string; classNa
   draft: { label: "草稿", className: "bg-slate-100 text-slate-700 border-slate-200" },
   archived: { label: "已归档", className: "bg-amber-50 text-amber-700 border-amber-200" }
 };
+
+export const LISTING_STATUS_META: Record<ListingStatus, { label: string; className: string }> = {
+  draft: { label: "草稿", className: "bg-slate-100 text-slate-700 border-slate-200" },
+  ready: { label: "已准备", className: "bg-blue-50 text-blue-700 border-blue-200" },
+  published: { label: "已上架（人工标记）", className: "bg-emerald-50 text-emerald-700 border-emerald-200" },
+  archived: { label: "已归档", className: "bg-amber-50 text-amber-800 border-amber-200" }
+};
+
+export const MASTER_ANGLE_OPTIONS = [
+  { value: "front", label: "正面 (front)" },
+  { value: "side", label: "侧面 (side)" },
+  { value: "back", label: "背面 (back)" },
+  { value: "top", label: "俯视 (top)" },
+  { value: "worn", label: "佩戴/使用态 (worn)" },
+  { value: "detail", label: "细节特写 (detail)" },
+  { value: "package", label: "包装形态 (package)" }
+];
+
+export function formatAspectRatio(width: number | null, height: number | null): string {
+  if (!width || !height || width <= 0 || height <= 0) return "—";
+  const gcd = (a: number, b: number): number => (b === 0 ? a : gcd(b, a % b));
+  const divisor = gcd(width, height);
+  const rw = Math.round(width / divisor);
+  const rh = Math.round(height / divisor);
+  if (rw <= 21 && rh <= 21) {
+    return `${rw}:${rh}`;
+  }
+  return `${(width / height).toFixed(2)}:1`;
+}
+
+export function countCodePoints(value: string): number {
+  return Array.from(value).length;
+}
 
 export const ASSET_PURPOSES = [
   { value: "raw", label: "实拍图" },

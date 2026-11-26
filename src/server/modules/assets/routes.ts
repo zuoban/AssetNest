@@ -16,12 +16,15 @@ import {
   sanitizeFilename
 } from "../media/detect.js";
 import {
+  appendAssetVersion,
   batchOperateAssets,
   ensureThumbnailReady,
   getAssetDetail,
   ingestStagedFile,
   listAssets,
   resolveAssetVersionFile,
+  reviewAssetVersion,
+  switchAssetCurrentVersion,
   updateAsset,
   type StagedUploadFile
 } from "./service.js";
@@ -29,6 +32,7 @@ import {
 const listAssetsQuerySchema = z.object({
   q: z.string().max(200).optional(),
   productId: z.string().uuid().optional(),
+  storeId: z.string().uuid().optional(),
   market: z.string().max(80).optional(),
   platform: z.string().max(80).optional(),
   purpose: z.string().max(80).optional(),
@@ -83,6 +87,15 @@ const batchAssetsSchema = z.object({
   productIds: z.array(z.string().uuid()).max(100).optional(),
   reviewStatus: z.enum(["pending", "approved", "rejected"]).optional(),
   reviewNote: z.string().max(1000).optional()
+});
+
+const switchCurrentVersionSchema = z.object({
+  versionId: z.string().uuid()
+});
+
+const reviewVersionSchema = z.object({
+  reviewStatus: z.enum(["pending", "approved", "rejected"]),
+  reviewNote: z.string().max(2000).optional()
 });
 
 function parseCsvOrJsonList(values: string[]): string[] {
@@ -337,6 +350,153 @@ export function registerAssetRoutes(
     const body = batchAssetsSchema.parse(request.body);
     return batchOperateAssets(db, request.authUser!.id, body);
   });
+
+  app.post("/api/v1/assets/:id/versions", { preHandler: requireAuth }, async (request, reply) => {
+    if (activeUploads >= config.uploads.maxConcurrency) {
+      throw new AppError(429, "RATE_LIMITED", "当前并发上传数量已达上限，请稍后重试");
+    }
+
+    const { id } = request.params as { id: string };
+    activeUploads += 1;
+    let stagedFile: StagedUploadFile | null = null;
+
+    try {
+      const tempDir = config.uploads.tempDir;
+      await fsp.mkdir(tempDir, { recursive: true });
+
+      const maxFileBytes = config.uploads.maxFileSizeMB * 1024 * 1024;
+      const maxTempBytes = Math.max(config.uploads.maxFileSizeMB * 2, 512) * 1024 * 1024;
+      const currentTempBytes = await measureDirectoryBytes(tempDir);
+      if (currentTempBytes >= maxTempBytes) {
+        throw new AppError(503, "STORAGE_OFFLINE", "临时上传暂存区空间不足，请稍后重试");
+      }
+
+      const fieldValues = new Map<string, string>();
+      const parts = request.parts();
+
+      for await (const part of parts) {
+        if (part.type === "field") {
+          fieldValues.set(
+            part.fieldname,
+            typeof part.value === "string" ? part.value : String(part.value ?? "")
+          );
+          continue;
+        }
+
+        if (stagedFile) {
+          // Drain extra files if any
+          for await (const _chunk of part.file) {
+            // discard
+          }
+          continue;
+        }
+
+        const tempPath = path.join(tempDir, `${crypto.randomUUID()}.upload`);
+        const hash = crypto.createHash("sha256");
+        const headerChunks: Buffer[] = [];
+        let headerBytes = 0;
+        let sizeBytes = 0;
+        const writeStream = fs.createWriteStream(tempPath, { flags: "wx", mode: 0o640 });
+
+        try {
+          for await (const chunk of part.file) {
+            const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+            sizeBytes += buf.length;
+            if (sizeBytes > maxFileBytes) {
+              throw new AppError(
+                413,
+                "PAYLOAD_TOO_LARGE",
+                `单文件大小超过上限（${config.uploads.maxFileSizeMB} MB）`
+              );
+            }
+            hash.update(buf);
+            if (headerBytes < 8192) {
+              const need = Math.min(8192 - headerBytes, buf.length);
+              headerChunks.push(buf.subarray(0, need));
+              headerBytes += need;
+            }
+            if (!writeStream.write(buf)) {
+              await new Promise<void>((resolve) => writeStream.once("drain", resolve));
+            }
+          }
+
+          await new Promise<void>((resolve, reject) => {
+            writeStream.on("error", reject);
+            writeStream.end(() => resolve());
+          });
+
+          if (part.file.truncated) {
+            throw new AppError(
+              413,
+              "PAYLOAD_TOO_LARGE",
+              `单文件大小超过上限（${config.uploads.maxFileSizeMB} MB）`
+            );
+          }
+
+          stagedFile = {
+            tempPath,
+            originalFilename: part.filename || "unnamed",
+            declaredMime: part.mimetype || "application/octet-stream",
+            sha256: hash.digest("hex"),
+            sizeBytes,
+            header: Buffer.concat(headerChunks)
+          };
+        } catch (err) {
+          writeStream.destroy();
+          await fsp.rm(tempPath, { force: true }).catch(() => {});
+          throw err;
+        }
+      }
+
+      if (!stagedFile) {
+        throw new AppError(400, "VALIDATION_ERROR", "请上传新版本文件");
+      }
+
+      const setAsCurrentRaw = (fieldValues.get("setAsCurrent") ?? "true").trim().toLowerCase();
+      const setAsCurrent = setAsCurrentRaw !== "false" && setAsCurrentRaw !== "0";
+      const referenceRaw = (fieldValues.get("referenceAssetVersionId") ?? "").trim();
+      const storageIdRaw = (fieldValues.get("storageId") ?? "").trim();
+
+      const created = await appendAssetVersion(
+        db,
+        config,
+        storageRegistry,
+        request.authUser!.id,
+        id,
+        stagedFile,
+        {
+          storageId: storageIdRaw || null,
+          changeNote: fieldValues.get("changeNote") ?? "",
+          promptText: fieldValues.get("promptText") ?? "",
+          referenceAssetVersionId: referenceRaw || null,
+          setAsCurrent
+        }
+      );
+
+      return reply.status(201).send(created);
+    } finally {
+      activeUploads = Math.max(0, activeUploads - 1);
+      if (stagedFile) {
+        await fsp.rm(stagedFile.tempPath, { force: true }).catch(() => {});
+      }
+    }
+  });
+
+  app.post("/api/v1/assets/:id/current-version", { preHandler: requireAuth }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = switchCurrentVersionSchema.parse(request.body);
+    return switchAssetCurrentVersion(db, request.authUser!.id, id, body.versionId);
+  });
+
+  app.post(
+    "/api/v1/asset-versions/:versionId/review",
+    { preHandler: requireAuth },
+    async (request) => {
+      const { versionId } = request.params as { versionId: string };
+      const body = reviewVersionSchema.parse(request.body);
+      return reviewAssetVersion(db, request.authUser!.id, versionId, body);
+    }
+  );
 
   app.get(
     "/api/v1/assets/:id/versions/:versionId/content",

@@ -13,10 +13,12 @@ import {
   FolderPlus,
   Grid,
   HardDrive,
+  History,
   Image as ImageIcon,
   Inbox,
   Layers,
   List,
+  Lock,
   Maximize2,
   Plus,
   RefreshCw,
@@ -36,6 +38,7 @@ import type {
   ProductSummary,
   ReviewStatus,
   StorageProviderSummary,
+  StoreRecord,
   TagDimension,
   TagRecord
 } from "../../shared/types";
@@ -64,6 +67,7 @@ const DIMENSION_ORDER: TagDimension[] = [
 export function AssetsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const uploadInputRef = useRef<HTMLInputElement>(null);
+  const versionFileInputRef = useRef<HTMLInputElement>(null);
   const scrollParentRef = useRef<HTMLDivElement>(null);
 
   // Taxonomy & reference lists
@@ -71,6 +75,7 @@ export function AssetsPage() {
   const [tags, setTags] = useState<TagRecord[]>([]);
   const [products, setProducts] = useState<ProductSummary[]>([]);
   const [storages, setStorages] = useState<StorageProviderSummary[]>([]);
+  const [stores, setStores] = useState<StoreRecord[]>([]);
 
   // Filter state
   const [quickView, setQuickView] = useState<QuickView>("all");
@@ -78,6 +83,7 @@ export function AssetsPage() {
   const [tagId, setTagId] = useState<string>("");
   const [storageId, setStorageId] = useState<string>("");
   const [productId, setProductId] = useState<string>(searchParams.get("productId") || "");
+  const [storeId, setStoreId] = useState<string>("");
   const [assetType, setAssetType] = useState<AssetType | "">("");
   const [reviewStatus, setReviewStatus] = useState<ReviewStatus | "">("");
   const [query, setQuery] = useState("");
@@ -108,6 +114,17 @@ export function AssetsPage() {
   const [editProductIds, setEditProductIds] = useState<string[]>([]);
   const [savingInspector, setSavingInspector] = useState(false);
   const [regenBusy, setRegenBusy] = useState(false);
+
+  // Version upload & independent per-version review
+  const [versionFormOpen, setVersionFormOpen] = useState(false);
+  const [versionFile, setVersionFile] = useState<File | null>(null);
+  const [versionChangeNote, setVersionChangeNote] = useState("");
+  const [versionPromptText, setVersionPromptText] = useState("");
+  const [versionSetCurrent, setVersionSetCurrent] = useState(true);
+  const [versionUploading, setVersionUploading] = useState(false);
+  const [versionActionBusyId, setVersionActionBusyId] = useState<string | null>(null);
+  const [reviewingVersionId, setReviewingVersionId] = useState<string | null>(null);
+  const [versionReviewNote, setVersionReviewNote] = useState("");
 
   // Upload state
   const [draggingOver, setDraggingOver] = useState(false);
@@ -156,16 +173,18 @@ export function AssetsPage() {
 
   const loadTaxonomy = useCallback(async () => {
     try {
-      const [folderRes, tagRes, productRes, storageRes] = await Promise.all([
+      const [folderRes, tagRes, productRes, storageRes, storeRes] = await Promise.all([
         api.listFolders(),
         api.listTags(),
         api.listProducts({ page: 1, pageSize: 200 }),
-        api.getStorageProviders()
+        api.getStorageProviders(),
+        api.listStores()
       ]);
       setFolders(folderRes.items);
       setTags(tagRes.items);
       setProducts(productRes.items);
       setStorages(storageRes.items);
+      setStores(storeRes.items);
     } catch (err) {
       setError(err instanceof Error ? err.message : "加载分类和筛选数据失败");
     }
@@ -182,6 +201,7 @@ export function AssetsPage() {
       const res = await api.listAssets({
         q: query.trim() || undefined,
         productId: productId || undefined,
+        storeId: storeId || undefined,
         tagId: tagId || undefined,
         folderId: folderId || undefined,
         storageId: storageId || undefined,
@@ -208,7 +228,7 @@ export function AssetsPage() {
     } finally {
       setLoading(false);
     }
-  }, [query, productId, tagId, folderId, storageId, assetType, reviewStatus, quickView, sort]);
+  }, [query, productId, storeId, tagId, folderId, storageId, assetType, reviewStatus, quickView, sort]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -245,6 +265,12 @@ export function AssetsPage() {
       setActiveAsset(null);
       return;
     }
+    setVersionFormOpen(false);
+    setVersionFile(null);
+    setVersionChangeNote("");
+    setVersionPromptText("");
+    setVersionSetCurrent(true);
+    setReviewingVersionId(null);
     void loadActiveAsset(activeAssetId);
   }, [activeAssetId, loadActiveAsset]);
 
@@ -433,6 +459,75 @@ export function AssetsPage() {
       setError(err instanceof ApiClientError ? err.message : "重新生成缩略图失败");
     } finally {
       setRegenBusy(false);
+    }
+  };
+
+  const handleAppendVersion = async () => {
+    if (!activeAsset || !versionFile) return;
+    setVersionUploading(true);
+    setError(null);
+    setNotice(null);
+    try {
+      const res = await api.appendAssetVersion(activeAsset.id, versionFile, {
+        changeNote: versionChangeNote.trim() || undefined,
+        promptText: versionPromptText.trim() || undefined,
+        setAsCurrent: versionSetCurrent
+      });
+      setActiveAsset(res.asset);
+      syncInspectorFields(res.asset);
+      setVersionFile(null);
+      setVersionChangeNote("");
+      setVersionPromptText("");
+      setVersionFormOpen(false);
+      if (versionFileInputRef.current) versionFileInputRef.current.value = "";
+      setNotice(
+        `已追加新版本 V${res.version.versionNo}（旧版本完整保留${
+          res.deduplicated ? "，复用已有底层文件" : ""
+        }）`
+      );
+      await loadAssets();
+    } catch (err) {
+      setError(err instanceof ApiClientError ? err.message : "上传新版本失败");
+    } finally {
+      setVersionUploading(false);
+    }
+  };
+
+  const handleSwitchVersion = async (versionId: string, versionNo: number) => {
+    if (!activeAsset) return;
+    setVersionActionBusyId(versionId);
+    setError(null);
+    try {
+      const updated = await api.switchAssetCurrentVersion(activeAsset.id, versionId);
+      setActiveAsset(updated);
+      syncInspectorFields(updated);
+      setNotice(`已将当前展示版本切换为 V${versionNo}`);
+      await loadAssets();
+    } catch (err) {
+      setError(err instanceof ApiClientError ? err.message : "切换版本失败");
+    } finally {
+      setVersionActionBusyId(null);
+    }
+  };
+
+  const handleReviewVersion = async (versionId: string, nextStatus: ReviewStatus) => {
+    if (!activeAsset) return;
+    setVersionActionBusyId(versionId);
+    setError(null);
+    try {
+      const updatedVer = await api.reviewAssetVersion(versionId, {
+        reviewStatus: nextStatus,
+        reviewNote: versionReviewNote.trim()
+      });
+      setReviewingVersionId(null);
+      setNotice(
+        `版本 V${updatedVer.versionNo} 审核状态已更新为「${REVIEW_STATUS_META[updatedVer.reviewStatus].label}」`
+      );
+      await Promise.all([loadActiveAsset(activeAsset.id), loadAssets()]);
+    } catch (err) {
+      setError(err instanceof ApiClientError ? err.message : "更新版本审核状态失败");
+    } finally {
+      setVersionActionBusyId(null);
     }
   };
 
@@ -856,6 +951,21 @@ export function AssetsPage() {
                 </option>
               ))}
             </select>
+
+            {stores.length > 0 && (
+              <select
+                value={storeId}
+                onChange={(e) => setStoreId(e.target.value)}
+                className="max-w-[150px] rounded-lg border border-gray-200 bg-white px-2 py-1.5 text-xs text-gray-700 focus:border-blue-500 focus:outline-none"
+              >
+                <option value="">全部店铺</option>
+                {stores.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    {s.name} ({s.market})
+                  </option>
+                ))}
+              </select>
+            )}
 
             <select
               value={assetType}
@@ -1407,6 +1517,199 @@ export function AssetsPage() {
                   <span className="font-mono-tabular text-gray-600">
                     {formatDateTime(activeAsset.createdAt)}
                   </span>
+                </div>
+              </div>
+
+              {/* Version History & Append New Version */}
+              <div className="space-y-2 rounded-lg border border-gray-200 bg-white p-2.5">
+                <div className="flex items-center justify-between gap-2">
+                  <span className="inline-flex items-center gap-1 font-semibold text-gray-900">
+                    <History className="h-3.5 w-3.5 text-blue-600" />
+                    <span>版本历史 ({activeAsset.versions.length})</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setVersionFormOpen((prev) => !prev)}
+                    className="inline-flex items-center gap-1 rounded border border-blue-200 bg-blue-50 px-2 py-0.5 text-[11px] font-medium text-blue-700 hover:bg-blue-100"
+                  >
+                    <Upload className="h-3 w-3" />
+                    <span>{versionFormOpen ? "收起" : "上传新版本"}</span>
+                  </button>
+                </div>
+
+                {versionFormOpen && (
+                  <div className="space-y-2 rounded-lg border border-blue-100 bg-blue-50/40 p-2.5 text-[11px]">
+                    <p className="text-gray-600">
+                      追加为 V{activeAsset.versions.length + 1}，不覆盖旧版本与已锁定的商品母图。
+                    </p>
+                    <input
+                      ref={versionFileInputRef}
+                      type="file"
+                      onChange={(e) => setVersionFile(e.target.files?.[0] ?? null)}
+                      className="block w-full text-[11px] text-gray-700 file:mr-2 file:rounded file:border-0 file:bg-white file:px-2 file:py-1 file:text-[11px] file:font-medium file:text-blue-700"
+                    />
+                    <input
+                      type="text"
+                      value={versionChangeNote}
+                      onChange={(e) => setVersionChangeNote(e.target.value)}
+                      placeholder="变更说明（如：调整高光、修复文字）"
+                      className="w-full rounded border border-gray-200 bg-white px-2 py-1 focus:border-blue-500 focus:outline-none"
+                    />
+                    <textarea
+                      rows={2}
+                      value={versionPromptText}
+                      onChange={(e) => setVersionPromptText(e.target.value)}
+                      placeholder="提示词 / 生成参数（可选）"
+                      className="w-full rounded border border-gray-200 bg-white px-2 py-1 focus:border-blue-500 focus:outline-none"
+                    />
+                    <label className="flex cursor-pointer items-center gap-1.5 text-gray-700">
+                      <input
+                        type="checkbox"
+                        checked={versionSetCurrent}
+                        onChange={(e) => setVersionSetCurrent(e.target.checked)}
+                        className="rounded border-gray-300"
+                      />
+                      <span>上传后设为当前展示版本</span>
+                    </label>
+                    <button
+                      type="button"
+                      disabled={!versionFile || versionUploading}
+                      onClick={() => void handleAppendVersion()}
+                      className="w-full rounded-lg bg-blue-600 px-2.5 py-1.5 font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+                    >
+                      {versionUploading ? "正在上传新版本..." : "提交新版本"}
+                    </button>
+                  </div>
+                )}
+
+                <div className="max-h-64 space-y-2 overflow-y-auto pr-0.5">
+                  {activeAsset.versions.map((ver) => {
+                    const isCurrent = ver.id === activeAsset.currentVersionId;
+                    const verReview = REVIEW_STATUS_META[ver.reviewStatus];
+                    const isReviewOpen = reviewingVersionId === ver.id;
+                    const busy = versionActionBusyId === ver.id;
+                    return (
+                      <div
+                        key={ver.id}
+                        className={`rounded-lg border p-2 text-[11px] ${
+                          isCurrent ? "border-blue-300 bg-blue-50/30" : "border-gray-100 bg-gray-50/70"
+                        }`}
+                      >
+                        <div className="flex flex-wrap items-center justify-between gap-1">
+                          <div className="flex flex-wrap items-center gap-1">
+                            <span className="font-mono-tabular font-semibold text-gray-900">
+                              V{ver.versionNo}
+                            </span>
+                            {isCurrent && (
+                              <span className="rounded bg-blue-600 px-1.5 py-0.5 text-[10px] font-medium text-white">
+                                当前
+                              </span>
+                            )}
+                            <span
+                              className={`rounded border px-1.5 py-0.5 text-[10px] font-medium ${verReview.className}`}
+                            >
+                              {verReview.label}
+                            </span>
+                          </div>
+                          <span className="font-mono-tabular text-[10px] text-gray-400">
+                            {formatBytes(ver.sizeBytes)}
+                          </span>
+                        </div>
+
+                        {ver.lockedMasterProducts && ver.lockedMasterProducts.length > 0 && (
+                          <div className="mt-1 flex flex-wrap gap-1">
+                            {ver.lockedMasterProducts.map((mp) => (
+                              <span
+                                key={mp.masterImageId}
+                                className="inline-flex items-center gap-0.5 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-medium text-amber-800"
+                              >
+                                <Lock className="h-2.5 w-2.5" />
+                                母图 {mp.spu}·{mp.angle}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+
+                        {ver.changeNote && (
+                          <p className="mt-1 text-gray-700">说明：{ver.changeNote}</p>
+                        )}
+                        {ver.reviewNote && (
+                          <p className="mt-0.5 text-gray-500">审核意见：{ver.reviewNote}</p>
+                        )}
+
+                        <div className="mt-1.5 flex flex-wrap items-center gap-2 border-t border-gray-200/70 pt-1.5">
+                          {!isCurrent && (
+                            <button
+                              type="button"
+                              disabled={busy}
+                              onClick={() => void handleSwitchVersion(ver.id, ver.versionNo)}
+                              className="font-medium text-blue-600 hover:text-blue-700 disabled:opacity-50"
+                            >
+                              设为当前
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (isReviewOpen) {
+                                setReviewingVersionId(null);
+                              } else {
+                                setReviewingVersionId(ver.id);
+                                setVersionReviewNote(ver.reviewNote || "");
+                              }
+                            }}
+                            className="font-medium text-gray-700 hover:text-blue-600"
+                          >
+                            {isReviewOpen ? "取消审核" : "独立审核"}
+                          </button>
+                          <a
+                            href={api.contentUrl(activeAsset.id, ver.id)}
+                            className="ml-auto text-gray-500 hover:text-gray-800"
+                          >
+                            下载
+                          </a>
+                        </div>
+
+                        {isReviewOpen && (
+                          <div className="mt-2 space-y-1.5 border-t border-gray-200 pt-2">
+                            <input
+                              type="text"
+                              value={versionReviewNote}
+                              onChange={(e) => setVersionReviewNote(e.target.value)}
+                              placeholder="输入本版本审核意见（可选）"
+                              className="w-full rounded border border-gray-200 bg-white px-2 py-1 focus:border-blue-500 focus:outline-none"
+                            />
+                            <div className="flex items-center gap-1.5">
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => void handleReviewVersion(ver.id, "approved")}
+                                className="flex-1 rounded bg-emerald-600 py-1 font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
+                              >
+                                通过
+                              </button>
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => void handleReviewVersion(ver.id, "rejected")}
+                                className="flex-1 rounded bg-rose-600 py-1 font-medium text-white hover:bg-rose-700 disabled:opacity-50"
+                              >
+                                拒绝
+                              </button>
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => void handleReviewVersion(ver.id, "pending")}
+                                className="flex-1 rounded border border-gray-200 bg-white py-1 font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+                              >
+                                待审
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    );
+                  })}
                 </div>
               </div>
 

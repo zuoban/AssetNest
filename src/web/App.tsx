@@ -6,12 +6,15 @@ import { Layout } from "./components/Layout";
 import { AssetsPage } from "./pages/AssetsPage";
 import { DashboardPage } from "./pages/DashboardPage";
 import { JobsPage } from "./pages/JobsPage";
+import { ListingsPage } from "./pages/ListingsPage";
+import { ListingWorkbenchPage } from "./pages/ListingWorkbenchPage";
 import { LoginPage } from "./pages/LoginPage";
 import { ProductDetailPage } from "./pages/ProductDetailPage";
 import { ProductsPage } from "./pages/ProductsPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { SetupPage } from "./pages/SetupPage";
 import { StoragePage } from "./pages/StoragePage";
+import { StoresPage } from "./pages/StoresPage";
 import { TrashPage } from "./pages/TrashPage";
 
 export function App() {
@@ -96,6 +99,9 @@ export function App() {
           <Route path="/" element={<DashboardPage />} />
           <Route path="/products" element={<ProductsPage />} />
           <Route path="/products/:id" element={<ProductDetailPage />} />
+          <Route path="/listings" element={<ListingsPage />} />
+          <Route path="/listings/:id" element={<ListingWorkbenchPage />} />
+          <Route path="/stores" element={<StoresPage />} />
           <Route path="/assets" element={<AssetsPage />} />
           <Route path="/trash" element={<TrashPage />} />
           <Route path="/storage" element={<StoragePage />} />
