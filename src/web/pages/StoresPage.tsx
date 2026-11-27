@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Link, useLocation, useSearchParams } from "react-router-dom";
 import {
   Archive,
   BookOpen,
@@ -32,6 +32,7 @@ const DICT_CATEGORY_META: Record<DictionaryCategory, { title: string; placeholde
 };
 
 export function StoresPage() {
+  const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
   const [tab, setTab] = useState<PageTab>(() =>
     searchParams.get("tab") === "dictionaries" ? "dictionaries" : "stores"
@@ -44,6 +45,14 @@ export function StoresPage() {
 
   const [stores, setStores] = useState<StoreRecord[]>([]);
   const [dictionaries, setDictionaries] = useState<DictionariesResponse | null>(null);
+  const [pendingAutoCreate, setPendingAutoCreate] = useState(false);
+
+  const storesReqSeqRef = useRef(0);
+  const dictsReqSeqRef = useRef(0);
+  const hasMountedStoresLoadRef = useRef(false);
+  const lastLocationKeyRef = useRef(location.key);
+  const lastUrlQRef = useRef<string | null>(searchParams.get("q"));
+  const internalUrlUpdateRef = useRef(false);
 
   // Store filters
   const [q, setQ] = useState(searchParams.get("q") ?? "");
@@ -68,31 +77,61 @@ export function StoresPage() {
   const [dictLabel, setDictLabel] = useState("");
   const [savingDict, setSavingDict] = useState(false);
 
-  const loadData = useCallback(async () => {
+  const loadDictionaries = useCallback(async () => {
+    const reqSeq = ++dictsReqSeqRef.current;
+    try {
+      const dictsRes = await api.getDictionaries();
+      if (reqSeq !== dictsReqSeqRef.current) return;
+      setDictionaries(dictsRes);
+    } catch (err) {
+      if (reqSeq !== dictsReqSeqRef.current) return;
+      setPendingAutoCreate(false);
+      setError(err instanceof Error ? err.message : "加载渠道字典失败");
+    }
+  }, []);
+
+  const loadStores = useCallback(async () => {
+    const reqSeq = ++storesReqSeqRef.current;
     setLoading(true);
     setError(null);
     try {
-      const [storesRes, dictsRes] = await Promise.all([
-        api.listStores({
-          q: q.trim() || undefined,
-          platform: platformFilter || undefined,
-          market: marketFilter || undefined,
-          status: statusFilter || undefined
-        }),
-        api.getDictionaries()
-      ]);
+      const storesRes = await api.listStores({
+        q: q.trim() || undefined,
+        platform: platformFilter || undefined,
+        market: marketFilter || undefined,
+        status: statusFilter || undefined
+      });
+      if (reqSeq !== storesReqSeqRef.current) return;
       setStores(storesRes.items);
-      setDictionaries(dictsRes);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "加载店铺与字典数据失败");
+      if (reqSeq !== storesReqSeqRef.current) return;
+      setError(err instanceof Error ? err.message : "加载店铺数据失败");
     } finally {
-      setLoading(false);
+      if (reqSeq === storesReqSeqRef.current) {
+        setLoading(false);
+      }
     }
   }, [q, platformFilter, marketFilter, statusFilter]);
 
+  const loadData = useCallback(async () => {
+    await Promise.all([loadStores(), loadDictionaries()]);
+  }, [loadStores, loadDictionaries]);
+
   useEffect(() => {
-    void loadData();
-  }, [loadData]);
+    void loadDictionaries();
+  }, [loadDictionaries]);
+
+  useEffect(() => {
+    if (!hasMountedStoresLoadRef.current) {
+      hasMountedStoresLoadRef.current = true;
+      void loadStores();
+      return;
+    }
+    const timer = window.setTimeout(() => {
+      void loadStores();
+    }, 150);
+    return () => window.clearTimeout(timer);
+  }, [loadStores]);
 
   const labelOf = (category: DictionaryCategory, code: string): string => {
     const list =
@@ -125,27 +164,45 @@ export function StoresPage() {
       } else {
         nextParams.delete("tab");
       }
+      internalUrlUpdateRef.current = true;
       setSearchParams(nextParams, { replace: true });
     },
     [searchParams, setSearchParams]
   );
 
   useEffect(() => {
-    const urlTab = searchParams.get("tab");
-    setTab(urlTab === "dictionaries" ? "dictionaries" : "stores");
+    const isInternal = internalUrlUpdateRef.current;
+    internalUrlUpdateRef.current = false;
+    const isExternalNavigation = !isInternal && location.key !== lastLocationKeyRef.current;
+    lastLocationKeyRef.current = location.key;
 
-    if (searchParams.has("q")) {
-      setQ(searchParams.get("q") ?? "");
+    const urlTab = searchParams.get("tab");
+    const wantsNew = searchParams.get("action") === "new";
+    setTab(wantsNew ? "stores" : urlTab === "dictionaries" ? "dictionaries" : "stores");
+
+    const urlQ = searchParams.get("q");
+    if (urlQ !== lastUrlQRef.current || (isExternalNavigation && urlQ !== null)) {
+      lastUrlQRef.current = urlQ;
+      if (urlQ !== null) {
+        setQ(urlQ);
+      }
     }
 
-    if (searchParams.get("action") === "new") {
-      setTab("stores");
-      openCreateModal();
+    if (wantsNew) {
+      setPendingAutoCreate(true);
       const nextParams = new URLSearchParams(searchParams);
       nextParams.delete("action");
+      nextParams.delete("tab");
+      internalUrlUpdateRef.current = true;
       setSearchParams(nextParams, { replace: true });
     }
-  }, [searchParams, setSearchParams, openCreateModal]);
+  }, [location.key, searchParams, setSearchParams]);
+
+  useEffect(() => {
+    if (!pendingAutoCreate || !dictionaries) return;
+    openCreateModal();
+    setPendingAutoCreate(false);
+  }, [pendingAutoCreate, dictionaries, openCreateModal]);
 
   useEffect(() => {
     if (!modalOpen || savingStore) return;
@@ -201,7 +258,7 @@ export function StoresPage() {
         setNotice(`已创建店铺「${storeName.trim()}」`);
       }
       setModalOpen(false);
-      await loadData();
+      await loadStores();
     } catch (err) {
       setError(err instanceof Error ? err.message : "保存店铺失败");
     } finally {
@@ -220,7 +277,7 @@ export function StoresPage() {
           ? `店铺「${store.name}」已归档`
           : `店铺「${store.name}」已重新启用`
       );
-      await loadData();
+      await loadStores();
     } catch (err) {
       setError(err instanceof Error ? err.message : "更新店铺状态失败");
     }
@@ -240,7 +297,7 @@ export function StoresPage() {
           await api.deleteStore(store.id);
           setConfirmDialog(null);
           setNotice(`已删除店铺「${store.name}」`);
-          await loadData();
+          await loadStores();
         } catch (err) {
           setConfirmDialog(null);
           if (err instanceof ApiClientError && err.status === 409) {
@@ -274,7 +331,7 @@ export function StoresPage() {
       setDictCode("");
       setDictLabel("");
       setNotice(`已添加${DICT_CATEGORY_META[dictCategory].title}项「${dictLabel.trim()}」`);
-      await loadData();
+      await loadDictionaries();
     } catch (err) {
       setError(err instanceof Error ? err.message : "保存字典项失败");
     } finally {
@@ -288,7 +345,7 @@ export function StoresPage() {
     try {
       await api.updateDictionary(item.category, item.code, { isActive: !item.isActive });
       setNotice(`已${item.isActive ? "停用" : "启用"}字典项「${item.label}」`);
-      await loadData();
+      await loadDictionaries();
     } catch (err) {
       setError(err instanceof Error ? err.message : "更新字典项失败");
     }

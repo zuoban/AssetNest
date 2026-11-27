@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import {
   AlertCircle,
   CheckCircle2,
@@ -103,7 +103,13 @@ export function TemplatesPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
+  const selectedIdRef = useRef<string | null>(null);
+  const isCreatingRef = useRef(false);
+  const loadReqSeqRef = useRef(0);
+
   const hydrateForm = useCallback((tpl: ExportTemplateRecord) => {
+    selectedIdRef.current = tpl.id;
+    isCreatingRef.current = false;
     setSelectedId(tpl.id);
     setIsCreating(false);
     setName(tpl.name);
@@ -118,6 +124,7 @@ export function TemplatesPage() {
   }, []);
 
   const load = useCallback(async () => {
+    const reqSeq = ++loadReqSeqRef.current;
     setLoading(true);
     setError(null);
     try {
@@ -125,33 +132,56 @@ export function TemplatesPage() {
         api.listExportTemplates(),
         api.getDictionaries()
       ]);
+      if (reqSeq !== loadReqSeqRef.current) return;
       setTemplates(tplRes.items);
       setDictionaries(dictRes);
-      if (tplRes.items.length > 0 && !selectedId && !isCreating) {
+      const currentSelectedId = selectedIdRef.current;
+      const currentlyCreating = isCreatingRef.current;
+      if (tplRes.items.length > 0 && !currentSelectedId && !currentlyCreating) {
         hydrateForm(tplRes.items[0]!);
-      } else if (selectedId) {
-        const current = tplRes.items.find((item) => item.id === selectedId);
-        if (current) hydrateForm(current);
+      } else if (currentSelectedId) {
+        const current = tplRes.items.find((item) => item.id === currentSelectedId);
+        if (current) {
+          hydrateForm(current);
+        } else if (tplRes.items.length > 0) {
+          hydrateForm(tplRes.items[0]!);
+        } else {
+          selectedIdRef.current = null;
+          setSelectedId(null);
+        }
       }
     } catch (err) {
+      if (reqSeq !== loadReqSeqRef.current) return;
       setError(err instanceof ApiClientError ? err.message : "加载导出模板失败");
     } finally {
-      setLoading(false);
+      if (reqSeq === loadReqSeqRef.current) {
+        setLoading(false);
+      }
     }
-  }, [hydrateForm, isCreating, selectedId]);
+  }, [hydrateForm]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
   const startCreate = () => {
+    isCreatingRef.current = true;
+    selectedIdRef.current = null;
     setIsCreating(true);
     setSelectedId(null);
     setError(null);
     setNotice(null);
     setName("");
-    setPlatform(dictionaries?.platforms[0]?.code ?? "shopee");
-    setMarket(dictionaries?.markets[0]?.code ?? "PH");
+    setPlatform(
+      dictionaries?.platforms.find((d) => d.isActive)?.code ??
+        dictionaries?.platforms[0]?.code ??
+        "shopee"
+    );
+    setMarket(
+      dictionaries?.markets.find((d) => d.isActive)?.code ??
+        dictionaries?.markets[0]?.code ??
+        "PH"
+    );
     setIsDefault(false);
     setRules(structuredClone(DEFAULT_RULES));
     setCarouselExtsText(DEFAULT_RULES.carousel.allowedExts.join(", "));
@@ -207,11 +237,9 @@ export function TemplatesPage() {
           rules: nextRules
         });
         setNotice(`已新建导出模板「${created.name}」(v${created.version})`);
-        setIsCreating(false);
-        setSelectedId(created.id);
+        hydrateForm(created);
         const refreshed = await api.listExportTemplates();
         setTemplates(refreshed.items);
-        hydrateForm(created);
       } else {
         const updated = await api.updateExportTemplate(selectedId, {
           name,
@@ -223,9 +251,9 @@ export function TemplatesPage() {
         setNotice(
           `已更新导出模板「${updated.name}」至 v${updated.version}（历史 Release 仍保留其发布时的模板版本快照）`
         );
+        hydrateForm(updated);
         const refreshed = await api.listExportTemplates();
         setTemplates(refreshed.items);
-        hydrateForm(updated);
       }
     } catch (err) {
       setError(err instanceof ApiClientError ? err.message : "保存导出模板失败");
