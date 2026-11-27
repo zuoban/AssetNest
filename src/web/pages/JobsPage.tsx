@@ -2,7 +2,8 @@ import { useCallback, useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { AlertCircle, CheckCircle2, RefreshCw, RotateCw, XCircle } from "lucide-react";
 import type { ActivityRecord, JobRecord } from "../../shared/types";
-import { api, ApiClientError } from "../api/client";
+import { api, ApiClientError, isAbortError } from "../api/client";
+import { LatestRequestController, startSafePolling } from "../utils/asyncControl";
 import { JobStatusBadge } from "../components/StatusBadge";
 import { formatDateTime } from "../utils/format";
 import { formatActivityAction, formatJobType, formatObjectType } from "../utils/labels";
@@ -23,35 +24,51 @@ export function JobsPage() {
   const [notice, setNotice] = useState<string | null>(null);
   const [actingId, setActingId] = useState<string | null>(null);
 
-  const load = useCallback(async (silent = false) => {
-    if (!silent) {
-      setLoading(true);
-    }
-    setError(null);
-    try {
-      const [jobsRes, actRes] = await Promise.all([api.getJobs(1, 50), api.getActivities(1, 50)]);
-      setJobs(jobsRes.items);
-      setActivities(actRes.items);
-    } catch (err) {
-      setError(err instanceof ApiClientError ? err.message : "加载记录失败");
-    } finally {
-      if (!silent) {
-        setLoading(false);
+  const [loadReq] = useState(() => new LatestRequestController());
+
+  const load = useCallback(
+    async (silent = false, options?: { signal?: AbortSignal; skipIfInFlight?: boolean }) => {
+      if (options?.skipIfInFlight && loadReq.isInFlight()) {
+        return;
       }
-    }
-  }, []);
+      const req = loadReq.next(options?.signal);
+      if (!silent) {
+        setLoading(true);
+        setError(null);
+      }
+      try {
+        const [jobsRes, actRes] = await Promise.all([
+          api.getJobs(1, 50, { signal: req.signal }),
+          api.getActivities(1, 50, { signal: req.signal })
+        ]);
+        if (!loadReq.isCurrent(req.id)) return;
+        setError(null);
+        setJobs(jobsRes.items);
+        setActivities(actRes.items);
+      } catch (err) {
+        if (!loadReq.isCurrent(req.id) || isAbortError(err)) return;
+        setError(err instanceof ApiClientError ? err.message : "加载记录失败");
+      } finally {
+        loadReq.finish(req.id);
+        if (loadReq.isCurrent(req.id)) {
+          setLoading(false);
+        }
+      }
+    },
+    [loadReq]
+  );
 
   useEffect(() => {
     void load(false);
-  }, [load]);
+    return () => {
+      loadReq.abort();
+    };
+  }, [load, loadReq]);
 
   const hasActiveJobs = jobs.some((job) => job.status === "queued" || job.status === "running");
   useEffect(() => {
     if (!hasActiveJobs) return;
-    const timer = setInterval(() => {
-      void load(true);
-    }, 2000);
-    return () => clearInterval(timer);
+    return startSafePolling((signal) => load(true, { signal, skipIfInFlight: true }), 2000);
   }, [hasActiveJobs, load]);
 
   const handleRetry = async (jobId: string) => {

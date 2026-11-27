@@ -43,7 +43,8 @@ import type {
   TagDimension,
   TagRecord
 } from "../../shared/types";
-import { api, ApiClientError } from "../api/client";
+import { api, ApiClientError, isAbortError } from "../api/client";
+import { LatestRequestController } from "../utils/asyncControl";
 import { AssetLightbox } from "../components/AssetLightbox";
 import { BatchAssetUpload, type DirectAssetUploadRequest, type PreparedUploadOptions } from "../components/BatchAssetUpload";
 import { ConfirmDialog, type ConfirmDialogState } from "../components/ConfirmDialog";
@@ -200,55 +201,73 @@ export function AssetsPage() {
     return () => observer.disconnect();
   }, []);
 
+  const [taxonomyReq] = useState(() => new LatestRequestController());
+  const [assetsReq] = useState(() => new LatestRequestController());
+  const [activeAssetReq] = useState(() => new LatestRequestController());
+
   const loadTaxonomy = useCallback(async () => {
-    const [folderRes, tagRes, productRes, storageRes, storeRes] = await Promise.allSettled([
-      api.listFolders(),
-      api.listTags(),
-      api.listProducts({ page: 1, pageSize: 100 }),
-      api.getStorageProviders(),
-      api.listStores()
-    ]);
+    const req = taxonomyReq.next();
+    try {
+      const [folderRes, tagRes, productRes, storageRes, storeRes] = await Promise.allSettled([
+        api.listFolders({ signal: req.signal }),
+        api.listTags(undefined, { signal: req.signal }),
+        api.listProducts({ page: 1, pageSize: 100 }, { signal: req.signal }),
+        api.getStorageProviders({ signal: req.signal }),
+        api.listStores({}, { signal: req.signal })
+      ]);
+      if (!taxonomyReq.isCurrent(req.id)) return;
 
-    const failures: string[] = [];
-    if (folderRes.status === "fulfilled") setFolders(folderRes.value.items);
-    else failures.push("文件夹");
-    if (tagRes.status === "fulfilled") setTags(tagRes.value.items);
-    else failures.push("标签");
-    if (productRes.status === "fulfilled") setProducts(productRes.value.items);
-    else failures.push("商品");
-    if (storageRes.status === "fulfilled") setStorages(storageRes.value.items);
-    else failures.push("存储位置");
-    if (storeRes.status === "fulfilled") setStores(storeRes.value.items);
-    else failures.push("店铺");
+      const failures: string[] = [];
+      if (folderRes.status === "fulfilled") setFolders(folderRes.value.items);
+      else if (!isAbortError(folderRes.reason)) failures.push("文件夹");
+      if (tagRes.status === "fulfilled") setTags(tagRes.value.items);
+      else if (!isAbortError(tagRes.reason)) failures.push("标签");
+      if (productRes.status === "fulfilled") setProducts(productRes.value.items);
+      else if (!isAbortError(productRes.reason)) failures.push("商品");
+      if (storageRes.status === "fulfilled") setStorages(storageRes.value.items);
+      else if (!isAbortError(storageRes.reason)) failures.push("存储位置");
+      if (storeRes.status === "fulfilled") setStores(storeRes.value.items);
+      else if (!isAbortError(storeRes.reason)) failures.push("店铺");
 
-    if (failures.length > 0) {
-      setError(`部分筛选项加载失败：${failures.join("、")}`);
+      if (failures.length > 0) {
+        setError(`部分筛选项加载失败：${failures.join("、")}`);
+      }
+    } finally {
+      taxonomyReq.finish(req.id);
     }
-  }, []);
+  }, [taxonomyReq]);
 
   useEffect(() => {
     void loadTaxonomy();
-  }, [loadTaxonomy]);
+    return () => {
+      taxonomyReq.abort();
+    };
+  }, [loadTaxonomy, taxonomyReq]);
 
   const loadAssets = useCallback(async () => {
+    const req = assetsReq.next();
     setLoading(true);
     setError(null);
     try {
-      const res = await api.listAssets({
-        q: query.trim() || undefined,
-        productId: productId || undefined,
-        storeId: storeId || undefined,
-        tagId: tagId || undefined,
-        folderId: folderId || undefined,
-        includeSubfolders: folderId ? includeSubfolders : undefined,
-        storageId: storageId || undefined,
-        type: assetType || undefined,
-        favorite: quickView === "favorite" ? true : undefined,
-        unfiled: quickView === "unfiled" ? true : undefined,
-        sort,
-        page: 1,
-        pageSize: 200
-      });
+      const res = await api.listAssets(
+        {
+          q: query.trim() || undefined,
+          productId: productId || undefined,
+          storeId: storeId || undefined,
+          tagId: tagId || undefined,
+          folderId: folderId || undefined,
+          includeSubfolders: folderId ? includeSubfolders : undefined,
+          storageId: storageId || undefined,
+          type: assetType || undefined,
+          favorite: quickView === "favorite" ? true : undefined,
+          unfiled: quickView === "unfiled" ? true : undefined,
+          sort,
+          page: 1,
+          pageSize: 200
+        },
+        { signal: req.signal }
+      );
+      if (!assetsReq.isCurrent(req.id)) return;
       setItems(res.items);
       setTotal(res.total);
       setSelectedIds((prev) => {
@@ -260,11 +279,16 @@ export function AssetsPage() {
         return next;
       });
     } catch (err) {
+      if (!assetsReq.isCurrent(req.id) || isAbortError(err)) return;
       setError(err instanceof Error ? err.message : "加载素材列表失败");
     } finally {
-      setLoading(false);
+      assetsReq.finish(req.id);
+      if (assetsReq.isCurrent(req.id)) {
+        setLoading(false);
+      }
     }
   }, [
+    assetsReq,
     query,
     productId,
     storeId,
@@ -281,8 +305,11 @@ export function AssetsPage() {
     const timer = window.setTimeout(() => {
       void loadAssets();
     }, 150);
-    return () => window.clearTimeout(timer);
-  }, [loadAssets]);
+    return () => {
+      window.clearTimeout(timer);
+      assetsReq.abort();
+    };
+  }, [assetsReq, loadAssets]);
 
   const syncInspectorFields = (detail: AssetDetail) => {
     setEditName(detail.name);
@@ -294,21 +321,32 @@ export function AssetsPage() {
     setEditProductIds(detail.products.map((p) => p.id));
   };
 
-  const loadActiveAsset = useCallback(async (assetId: string) => {
-    setInspectorLoading(true);
-    try {
-      const detail = await api.getAsset(assetId);
-      setActiveAsset(detail);
-      syncInspectorFields(detail);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "加载素材详情失败");
-    } finally {
-      setInspectorLoading(false);
-    }
-  }, []);
+  const loadActiveAsset = useCallback(
+    async (assetId: string) => {
+      const req = activeAssetReq.next();
+      setInspectorLoading(true);
+      try {
+        const detail = await api.getAsset(assetId, { signal: req.signal });
+        if (!activeAssetReq.isCurrent(req.id)) return;
+        setActiveAsset(detail);
+        syncInspectorFields(detail);
+      } catch (err) {
+        if (!activeAssetReq.isCurrent(req.id) || isAbortError(err)) return;
+        setError(err instanceof Error ? err.message : "加载素材详情失败");
+      } finally {
+        activeAssetReq.finish(req.id);
+        if (activeAssetReq.isCurrent(req.id)) {
+          setInspectorLoading(false);
+        }
+      }
+    },
+    [activeAssetReq]
+  );
 
   useEffect(() => {
     if (!activeAssetId) {
+      activeAssetReq.abort();
+      setInspectorLoading(false);
       setActiveAsset(null);
       return;
     }
@@ -317,7 +355,10 @@ export function AssetsPage() {
     setVersionPromptText("");
     setVersionSetCurrent(true);
     void loadActiveAsset(activeAssetId);
-  }, [activeAssetId, loadActiveAsset]);
+    return () => {
+      activeAssetReq.abort();
+    };
+  }, [activeAssetId, activeAssetReq, loadActiveAsset]);
 
   useEffect(() => {
     if (!activeAssetId || lightboxIndex !== null || confirmDialog || uploadModalOpen) return;

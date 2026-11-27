@@ -32,7 +32,8 @@ import type {
   SkuStatus,
   StoreRecord
 } from "../../shared/types";
-import { api, ApiClientError } from "../api/client";
+import { api, ApiClientError, isAbortError } from "../api/client";
+import { LatestRequestController } from "../utils/asyncControl";
 import { AssetLightbox } from "../components/AssetLightbox";
 import { BatchAssetUpload, type PreparedUploadOptions } from "../components/BatchAssetUpload";
 import { ConfirmDialog, type ConfirmDialogState } from "../components/ConfirmDialog";
@@ -175,18 +176,26 @@ export function ProductDetailPage() {
     setConstraints(detail.appearanceConstraints || {});
   };
 
+  const [loadAllReq] = useState(() => new LatestRequestController());
+
   const loadAll = useCallback(async () => {
-    if (!id) return;
+    if (!id) {
+      loadAllReq.abort();
+      setLoading(false);
+      return;
+    }
+    const req = loadAllReq.next();
     setLoading(true);
     setError(null);
     try {
       const [detail, assetRes, masterRes, listingRes, storeRes] = await Promise.all([
-        api.getProduct(id),
-        api.listAssets({ productId: id, page: 1, pageSize: 100 }),
-        api.listProductMasterImages(id),
-        api.listListings({ productId: id, page: 1, pageSize: 100 }),
-        api.listStores()
+        api.getProduct(id, { signal: req.signal }),
+        api.listAssets({ productId: id, page: 1, pageSize: 100 }, { signal: req.signal }),
+        api.listProductMasterImages(id, false, { signal: req.signal }),
+        api.listListings({ productId: id, page: 1, pageSize: 100 }, { signal: req.signal }),
+        api.listStores({}, { signal: req.signal })
       ]);
+      if (!loadAllReq.isCurrent(req.id)) return;
       setProduct(detail);
       syncFormFromProduct(detail);
       recordRecentVisit({
@@ -205,17 +214,26 @@ export function ProductDetailPage() {
         setSelectedMasterId((prev) =>
           prev && masterRes.items.some((m) => m.id === prev) ? prev : primary.id
         );
+      } else {
+        setSelectedMasterId("");
       }
     } catch (err) {
+      if (!loadAllReq.isCurrent(req.id) || isAbortError(err)) return;
       setError(err instanceof Error ? err.message : "加载商品详情失败");
     } finally {
-      setLoading(false);
+      loadAllReq.finish(req.id);
+      if (loadAllReq.isCurrent(req.id)) {
+        setLoading(false);
+      }
     }
-  }, [id]);
+  }, [id, loadAllReq]);
 
   useEffect(() => {
     void loadAll();
-  }, [loadAll]);
+    return () => {
+      loadAllReq.abort();
+    };
+  }, [loadAll, loadAllReq]);
 
   useEffect(() => {
     setTab(parseProductTab(searchParams.get("tab")));
@@ -239,29 +257,29 @@ export function ProductDetailPage() {
     if (!compareOpen || !compareAssetId) {
       setCompareAssetDetail(null);
       setCompareVersionId("");
+      setCompareLoading(false);
       return;
     }
-    let cancelled = false;
+    const controller = new AbortController();
     setCompareLoading(true);
     api
-      .getAsset(compareAssetId)
+      .getAsset(compareAssetId, { signal: controller.signal })
       .then((detail) => {
-        if (cancelled) return;
+        if (controller.signal.aborted) return;
         setCompareAssetDetail(detail);
         setCompareVersionId((prev) =>
           prev && detail.versions.some((v) => v.id === prev) ? prev : detail.currentVersionId
         );
       })
       .catch((err) => {
-        if (!cancelled) {
-          setError(err instanceof Error ? err.message : "加载对比素材版本失败");
-        }
+        if (controller.signal.aborted || isAbortError(err)) return;
+        setError(err instanceof Error ? err.message : "加载对比素材版本失败");
       })
       .finally(() => {
-        if (!cancelled) setCompareLoading(false);
+        if (!controller.signal.aborted) setCompareLoading(false);
       });
     return () => {
-      cancelled = true;
+      controller.abort();
     };
   }, [compareOpen, compareAssetId]);
 

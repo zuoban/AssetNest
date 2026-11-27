@@ -62,8 +62,21 @@ import {
   type ImageUploadSizes,
   type PreparedUploadFile
 } from "../utils/uploadPreparation";
+import { isAbortError } from "../utils/asyncControl";
 
+export { isAbortError };
 export type { CompressionBatchProgress, ImageUploadSizes, PreparedUploadFile };
+
+export interface ApiRequestOptions {
+  signal?: AbortSignal;
+}
+
+function withSignal(options?: ApiRequestOptions, init: RequestInit = {}): RequestInit {
+  if (!options?.signal) {
+    return init;
+  }
+  return { ...init, signal: options.signal };
+}
 
 export class ApiClientError extends Error {
   readonly status: number;
@@ -252,8 +265,8 @@ async function appendUploadFiles(
 }
 
 export const api = {
-  getAuthStatus(): Promise<AuthStatusResponse> {
-    return requestJson("/api/v1/auth/status");
+  getAuthStatus(options?: ApiRequestOptions): Promise<AuthStatusResponse> {
+    return requestJson("/api/v1/auth/status", withSignal(options));
   },
   login(payload: { accessCode: string }): Promise<{ user: UserProfile }> {
     return requestJson("/api/v1/auth/login", {
@@ -267,14 +280,14 @@ export const api = {
       body: JSON.stringify({})
     });
   },
-  getMe(): Promise<AuthMeResponse> {
-    return requestJson("/api/v1/auth/me");
+  getMe(options?: ApiRequestOptions): Promise<AuthMeResponse> {
+    return requestJson("/api/v1/auth/me", withSignal(options));
   },
-  getDashboard(): Promise<DashboardResponse> {
-    return requestJson("/api/v1/dashboard");
+  getDashboard(options?: ApiRequestOptions): Promise<DashboardResponse> {
+    return requestJson("/api/v1/dashboard", withSignal(options));
   },
-  getSettings(): Promise<AppSettings> {
-    return requestJson("/api/v1/settings");
+  getSettings(options?: ApiRequestOptions): Promise<AppSettings> {
+    return requestJson("/api/v1/settings", withSignal(options));
   },
   updateSettings(payload: {
     trashRetentionDays?: number;
@@ -286,22 +299,33 @@ export const api = {
       body: JSON.stringify(payload)
     });
   },
-  getStorageProviders(): Promise<{ items: StorageProviderSummary[] }> {
-    return requestJson("/api/v1/storage/providers");
+  getStorageProviders(options?: ApiRequestOptions): Promise<{ items: StorageProviderSummary[] }> {
+    return requestJson("/api/v1/storage/providers", withSignal(options));
   },
-  getJobs(page = 1, pageSize = 20): Promise<PaginatedResponse<JobRecord>> {
-    return requestJson(`/api/v1/jobs?page=${page}&pageSize=${pageSize}`);
+  getJobs(
+    page = 1,
+    pageSize = 20,
+    options?: ApiRequestOptions
+  ): Promise<PaginatedResponse<JobRecord>> {
+    return requestJson(`/api/v1/jobs?page=${page}&pageSize=${pageSize}`, withSignal(options));
   },
-  getActivities(page = 1, pageSize = 20): Promise<PaginatedResponse<ActivityRecord>> {
-    return requestJson(`/api/v1/activities?page=${page}&pageSize=${pageSize}`);
+  getActivities(
+    page = 1,
+    pageSize = 20,
+    options?: ApiRequestOptions
+  ): Promise<PaginatedResponse<ActivityRecord>> {
+    return requestJson(`/api/v1/activities?page=${page}&pageSize=${pageSize}`, withSignal(options));
   },
-  listProducts(params: {
-    q?: string;
-    status?: ProductStatus;
-    category?: string;
-    page?: number;
-    pageSize?: number;
-  } = {}): Promise<PaginatedResponse<ProductSummary>> {
+  listProducts(
+    params: {
+      q?: string;
+      status?: ProductStatus;
+      category?: string;
+      page?: number;
+      pageSize?: number;
+    } = {},
+    options?: ApiRequestOptions
+  ): Promise<PaginatedResponse<ProductSummary>> {
     const qs = new URLSearchParams();
     if (params.q) qs.set("q", params.q);
     if (params.status) qs.set("status", params.status);
@@ -309,7 +333,7 @@ export const api = {
     if (params.page) qs.set("page", String(params.page));
     if (params.pageSize) qs.set("pageSize", String(params.pageSize));
     const query = qs.toString();
-    return requestJson(`/api/v1/products${query ? `?${query}` : ""}`);
+    return requestJson(`/api/v1/products${query ? `?${query}` : ""}`, withSignal(options));
   },
   createProduct(payload: Partial<ProductCostInputs> & {
     spu: string;
@@ -329,8 +353,8 @@ export const api = {
       body: JSON.stringify(payload)
     });
   },
-  getProduct(id: string): Promise<ProductDetail> {
-    return requestJson(`/api/v1/products/${id}`);
+  getProduct(id: string, options?: ApiRequestOptions): Promise<ProductDetail> {
+    return requestJson(`/api/v1/products/${id}`, withSignal(options));
   },
   updateProduct(
     id: string,
@@ -397,8 +421,8 @@ export const api = {
       method: "DELETE"
     });
   },
-  listFolders(): Promise<{ items: FolderRecord[] }> {
-    return requestJson("/api/v1/folders");
+  listFolders(options?: ApiRequestOptions): Promise<{ items: FolderRecord[] }> {
+    return requestJson("/api/v1/folders", withSignal(options));
   },
   createFolder(payload: { name: string; parentId?: string | null }): Promise<FolderRecord> {
     return requestJson("/api/v1/folders", {
@@ -424,8 +448,8 @@ export const api = {
       method: "DELETE"
     });
   },
-  listTags(dimension?: TagDimension): Promise<{ items: TagRecord[] }> {
-    return requestJson(`/api/v1/tags${dimension ? `?dimension=${dimension}` : ""}`);
+  listTags(dimension?: TagDimension, options?: ApiRequestOptions): Promise<{ items: TagRecord[] }> {
+    return requestJson(`/api/v1/tags${dimension ? `?dimension=${dimension}` : ""}`, withSignal(options));
   },
   createTag(payload: { dimension: TagDimension; name: string; parentId?: string | null }): Promise<TagRecord> {
     return requestJson("/api/v1/tags", {
@@ -438,27 +462,30 @@ export const api = {
       method: "DELETE"
     });
   },
-  listAssets(params: {
-    q?: string;
-    productId?: string;
-    storeId?: string;
-    market?: string;
-    platform?: string;
-    purpose?: string;
-    scene?: string;
-    color?: string;
-    tagId?: string;
-    type?: AssetType;
-    folderId?: string;
-    includeSubfolders?: boolean;
-    unfiled?: boolean;
-    favorite?: boolean;
-    storageId?: string;
-    minWidth?: number;
-    sort?: "newest" | "oldest" | "name_asc" | "size_desc";
-    page?: number;
-    pageSize?: number;
-  } = {}): Promise<PaginatedResponse<AssetListItem>> {
+  listAssets(
+    params: {
+      q?: string;
+      productId?: string;
+      storeId?: string;
+      market?: string;
+      platform?: string;
+      purpose?: string;
+      scene?: string;
+      color?: string;
+      tagId?: string;
+      type?: AssetType;
+      folderId?: string;
+      includeSubfolders?: boolean;
+      unfiled?: boolean;
+      favorite?: boolean;
+      storageId?: string;
+      minWidth?: number;
+      sort?: "newest" | "oldest" | "name_asc" | "size_desc";
+      page?: number;
+      pageSize?: number;
+    } = {},
+    options?: ApiRequestOptions
+  ): Promise<PaginatedResponse<AssetListItem>> {
     const qs = new URLSearchParams();
     if (params.q) qs.set("q", params.q);
     if (params.productId) qs.set("productId", params.productId);
@@ -480,10 +507,10 @@ export const api = {
     if (params.page) qs.set("page", String(params.page));
     if (params.pageSize) qs.set("pageSize", String(params.pageSize));
     const query = qs.toString();
-    return requestJson(`/api/v1/assets${query ? `?${query}` : ""}`);
+    return requestJson(`/api/v1/assets${query ? `?${query}` : ""}`, withSignal(options));
   },
-  getAsset(id: string): Promise<AssetDetail> {
-    return requestJson(`/api/v1/assets/${id}`);
+  getAsset(id: string, options?: ApiRequestOptions): Promise<AssetDetail> {
+    return requestJson(`/api/v1/assets/${id}`, withSignal(options));
   },
   updateAsset(
     id: string,
@@ -614,10 +641,12 @@ export const api = {
   },
   listProductMasterImages(
     productId: string,
-    includeHistory = false
+    includeHistory = false,
+    options?: ApiRequestOptions
   ): Promise<{ items: ProductMasterImageRecord[] }> {
     return requestJson(
-      `/api/v1/products/${encodeURIComponent(productId)}/master-images${includeHistory ? "?includeHistory=1" : ""}`
+      `/api/v1/products/${encodeURIComponent(productId)}/master-images${includeHistory ? "?includeHistory=1" : ""}`,
+      withSignal(options)
     );
   },
   lockProductMasterImage(
@@ -679,8 +708,8 @@ export const api = {
   contentUrl(assetId: string, versionId: string, preview = false): string {
     return `/api/v1/assets/${assetId}/versions/${versionId}/content${preview ? "?preview=1" : ""}`;
   },
-  getTrash(): Promise<TrashResponse> {
-    return requestJson("/api/v1/trash");
+  getTrash(options?: ApiRequestOptions): Promise<TrashResponse> {
+    return requestJson("/api/v1/trash", withSignal(options));
   },
   restoreTrash(
     type: "asset" | "product" | "listing",
@@ -737,10 +766,11 @@ export const api = {
     });
   },
   getStorageCleanupQueue(
-    status?: StorageCleanupItem["status"]
+    status?: StorageCleanupItem["status"],
+    options?: ApiRequestOptions
   ): Promise<StorageCleanupQueueResponse> {
     const qs = status ? `?status=${encodeURIComponent(status)}` : "";
-    return requestJson(`/api/v1/storage/cleanup-queue${qs}`);
+    return requestJson(`/api/v1/storage/cleanup-queue${qs}`, withSignal(options));
   },
   confirmStorageCleanup(payload: {
     ids?: string[];
@@ -751,8 +781,8 @@ export const api = {
       body: JSON.stringify(payload)
     });
   },
-  getJob(jobId: string): Promise<JobRecord> {
-    return requestJson(`/api/v1/jobs/${encodeURIComponent(jobId)}`);
+  getJob(jobId: string, options?: ApiRequestOptions): Promise<JobRecord> {
+    return requestJson(`/api/v1/jobs/${encodeURIComponent(jobId)}`, withSignal(options));
   },
   retryJob(jobId: string): Promise<JobRecord> {
     return requestJson(`/api/v1/jobs/${encodeURIComponent(jobId)}/retry`, {
@@ -772,8 +802,8 @@ export const api = {
       body: JSON.stringify({})
     });
   },
-  getBackups(): Promise<{ items: BackupRecord[] }> {
-    return requestJson("/api/v1/backups");
+  getBackups(options?: ApiRequestOptions): Promise<{ items: BackupRecord[] }> {
+    return requestJson("/api/v1/backups", withSignal(options));
   },
   createBackup(kind: BackupKind): Promise<{ backup: BackupRecord; job: JobRecord }> {
     return requestJson("/api/v1/backups", {
@@ -784,15 +814,18 @@ export const api = {
   backupDownloadUrl(backupId: string): string {
     return `/api/v1/backups/${encodeURIComponent(backupId)}/download`;
   },
-  getDictionaries(params: {
-    category?: DictionaryCategory;
-    activeOnly?: boolean;
-  } = {}): Promise<DictionariesResponse> {
+  getDictionaries(
+    params: {
+      category?: DictionaryCategory;
+      activeOnly?: boolean;
+    } = {},
+    options?: ApiRequestOptions
+  ): Promise<DictionariesResponse> {
     const qs = new URLSearchParams();
     if (params.category) qs.set("category", params.category);
     if (params.activeOnly) qs.set("activeOnly", "1");
     const query = qs.toString();
-    return requestJson(`/api/v1/dictionaries${query ? `?${query}` : ""}`);
+    return requestJson(`/api/v1/dictionaries${query ? `?${query}` : ""}`, withSignal(options));
   },
   upsertDictionary(payload: {
     category: DictionaryCategory;
@@ -823,19 +856,22 @@ export const api = {
       }
     );
   },
-  listStores(params: {
-    q?: string;
-    platform?: string;
-    market?: string;
-    status?: StoreStatus;
-  } = {}): Promise<{ items: StoreRecord[] }> {
+  listStores(
+    params: {
+      q?: string;
+      platform?: string;
+      market?: string;
+      status?: StoreStatus;
+    } = {},
+    options?: ApiRequestOptions
+  ): Promise<{ items: StoreRecord[] }> {
     const qs = new URLSearchParams();
     if (params.q) qs.set("q", params.q);
     if (params.platform) qs.set("platform", params.platform);
     if (params.market) qs.set("market", params.market);
     if (params.status) qs.set("status", params.status);
     const query = qs.toString();
-    return requestJson(`/api/v1/stores${query ? `?${query}` : ""}`);
+    return requestJson(`/api/v1/stores${query ? `?${query}` : ""}`, withSignal(options));
   },
   createStore(payload: {
     name: string;
@@ -871,16 +907,19 @@ export const api = {
       method: "DELETE"
     });
   },
-  listListings(params: {
-    q?: string;
-    productId?: string;
-    storeId?: string;
-    platform?: string;
-    market?: string;
-    status?: ListingStatus;
-    page?: number;
-    pageSize?: number;
-  } = {}): Promise<PaginatedResponse<ListingSummary>> {
+  listListings(
+    params: {
+      q?: string;
+      productId?: string;
+      storeId?: string;
+      platform?: string;
+      market?: string;
+      status?: ListingStatus;
+      page?: number;
+      pageSize?: number;
+    } = {},
+    options?: ApiRequestOptions
+  ): Promise<PaginatedResponse<ListingSummary>> {
     const qs = new URLSearchParams();
     if (params.q) qs.set("q", params.q);
     if (params.productId) qs.set("productId", params.productId);
@@ -891,7 +930,7 @@ export const api = {
     if (params.page) qs.set("page", String(params.page));
     if (params.pageSize) qs.set("pageSize", String(params.pageSize));
     const query = qs.toString();
-    return requestJson(`/api/v1/listings${query ? `?${query}` : ""}`);
+    return requestJson(`/api/v1/listings${query ? `?${query}` : ""}`, withSignal(options));
   },
   createListing(payload: {
     productId: string;
@@ -909,8 +948,8 @@ export const api = {
       body: JSON.stringify(payload)
     });
   },
-  getListing(id: string): Promise<ListingDetail> {
-    return requestJson(`/api/v1/listings/${encodeURIComponent(id)}`);
+  getListing(id: string, options?: ApiRequestOptions): Promise<ListingDetail> {
+    return requestJson(`/api/v1/listings/${encodeURIComponent(id)}`, withSignal(options));
   },
   updateListing(
     id: string,
@@ -955,8 +994,8 @@ export const api = {
       body: JSON.stringify({ items })
     });
   },
-  getListingAssetSets(id: string): Promise<ListingAssetSetsResponse> {
-    return requestJson(`/api/v1/listings/${encodeURIComponent(id)}/asset-sets`);
+  getListingAssetSets(id: string, options?: ApiRequestOptions): Promise<ListingAssetSetsResponse> {
+    return requestJson(`/api/v1/listings/${encodeURIComponent(id)}/asset-sets`, withSignal(options));
   },
   replaceListingAssetSet(
     id: string,
@@ -969,8 +1008,8 @@ export const api = {
       body: JSON.stringify({ items, expectedItemIds })
     });
   },
-  getListingPdp(id: string): Promise<ListingPdpResponse> {
-    return requestJson(`/api/v1/listings/${encodeURIComponent(id)}/pdp`);
+  getListingPdp(id: string, options?: ApiRequestOptions): Promise<ListingPdpResponse> {
+    return requestJson(`/api/v1/listings/${encodeURIComponent(id)}/pdp`, withSignal(options));
   },
   saveListingPdpDraft(
     id: string,
@@ -1014,15 +1053,18 @@ export const api = {
   },
 
   // M4: Export templates, preflight validation, immutable releases, exports & restore
-  listExportTemplates(params?: {
-    platform?: string;
-    market?: string;
-  }): Promise<{ items: ExportTemplateRecord[] }> {
+  listExportTemplates(
+    params?: {
+      platform?: string;
+      market?: string;
+    },
+    options?: ApiRequestOptions
+  ): Promise<{ items: ExportTemplateRecord[] }> {
     const sp = new URLSearchParams();
     if (params?.platform) sp.set("platform", params.platform);
     if (params?.market) sp.set("market", params.market);
     const qs = sp.toString();
-    return requestJson(`/api/v1/export-templates${qs ? `?${qs}` : ""}`);
+    return requestJson(`/api/v1/export-templates${qs ? `?${qs}` : ""}`, withSignal(options));
   },
   createExportTemplate(payload: {
     name: string;
@@ -1051,11 +1093,18 @@ export const api = {
       body: JSON.stringify(payload)
     });
   },
-  validateListing(listingId: string, templateId?: string): Promise<ListingValidationResult> {
-    return requestJson(`/api/v1/listings/${encodeURIComponent(listingId)}/validate`, {
-      method: "POST",
-      body: JSON.stringify(templateId ? { templateId } : {})
-    });
+  validateListing(
+    listingId: string,
+    templateId?: string,
+    options?: ApiRequestOptions
+  ): Promise<ListingValidationResult> {
+    return requestJson(
+      `/api/v1/listings/${encodeURIComponent(listingId)}/validate`,
+      withSignal(options, {
+        method: "POST",
+        body: JSON.stringify(templateId ? { templateId } : {})
+      })
+    );
   },
   createRelease(
     listingId: string,
@@ -1066,11 +1115,14 @@ export const api = {
       body: JSON.stringify(payload)
     });
   },
-  listListingReleases(listingId: string): Promise<{ items: ReleaseSummary[] }> {
-    return requestJson(`/api/v1/listings/${encodeURIComponent(listingId)}/releases`);
+  listListingReleases(
+    listingId: string,
+    options?: ApiRequestOptions
+  ): Promise<{ items: ReleaseSummary[] }> {
+    return requestJson(`/api/v1/listings/${encodeURIComponent(listingId)}/releases`, withSignal(options));
   },
-  getReleaseDetail(releaseId: string): Promise<ReleaseDetail> {
-    return requestJson(`/api/v1/releases/${encodeURIComponent(releaseId)}`);
+  getReleaseDetail(releaseId: string, options?: ApiRequestOptions): Promise<ReleaseDetail> {
+    return requestJson(`/api/v1/releases/${encodeURIComponent(releaseId)}`, withSignal(options));
   },
   restoreReleaseDraft(
     releaseId: string,

@@ -58,7 +58,8 @@ import type {
   ProductDetail,
   StoreRecord
 } from "../../shared/types";
-import { api, ApiClientError } from "../api/client";
+import { api, ApiClientError, isAbortError } from "../api/client";
+import { LatestRequestController } from "../utils/asyncControl";
 import { ConfirmDialog, type ConfirmDialogState } from "../components/ConfirmDialog";
 import { useFileDrop } from "../components/FileDropButton";
 import { BatchAssetUpload } from "../components/BatchAssetUpload";
@@ -445,18 +446,33 @@ function ListingWorkbench({ id }: { id?: string }) {
     useSensor(KeyboardSensor, { coordinateGetter: sortableKeyboardCoordinates })
   );
 
+  const [loadAllReq] = useState(() => new LatestRequestController());
+
   const loadAll = useCallback(async () => {
-    if (!id) return;
+    if (!id) {
+      loadAllReq.abort();
+      setLoading(false);
+      return;
+    }
+    const req = loadAllReq.next();
     setLoading(true);
     setError(null);
     try {
       const [detailRes, setsRes, pdpRes, storesRes, dictsRes] = await Promise.all([
-        api.getListing(id),
-        api.getListingAssetSets(id),
-        api.getListingPdp(id),
-        api.listStores(),
-        api.getDictionaries()
+        api.getListing(id, { signal: req.signal }),
+        api.getListingAssetSets(id, { signal: req.signal }),
+        api.getListingPdp(id, { signal: req.signal }),
+        api.listStores({}, { signal: req.signal }),
+        api.getDictionaries({}, { signal: req.signal })
       ]);
+      if (!loadAllReq.isCurrent(req.id)) return;
+
+      const [prodRes, sibRes] = await Promise.all([
+        api.getProduct(detailRes.productId, { signal: req.signal }),
+        api.listListings({ productId: detailRes.productId, page: 1, pageSize: 50 }, { signal: req.signal })
+      ]);
+      if (!loadAllReq.isCurrent(req.id)) return;
+
       setListing(detailRes);
       recordRecentVisit({
         kind: "listing",
@@ -479,10 +495,6 @@ function ListingWorkbench({ id }: { id?: string }) {
       setPdpLang(pdpRes.draft.language);
       setPdpContent(pdpRes.draft.content);
 
-      const [prodRes, sibRes] = await Promise.all([
-        api.getProduct(detailRes.productId),
-        api.listListings({ productId: detailRes.productId, page: 1, pageSize: 50 })
-      ]);
       setProduct(prodRes);
       setSiblings(sibRes.items);
 
@@ -501,15 +513,22 @@ function ListingWorkbench({ id }: { id?: string }) {
       }
       setSkuDraft(nextSkuDraft);
     } catch (err) {
+      if (!loadAllReq.isCurrent(req.id) || isAbortError(err)) return;
       setError(err instanceof Error ? err.message : "加载上架工作台失败");
     } finally {
-      setLoading(false);
+      loadAllReq.finish(req.id);
+      if (loadAllReq.isCurrent(req.id)) {
+        setLoading(false);
+      }
     }
-  }, [id]);
+  }, [id, loadAllReq]);
 
   useEffect(() => {
     void loadAll();
-  }, [loadAll]);
+    return () => {
+      loadAllReq.abort();
+    };
+  }, [loadAll, loadAllReq]);
 
   useEffect(() => {
     const group = routeGroup === "carousel" || routeGroup === "detail" || routeGroup === "sku" || routeGroup === "video"
@@ -761,7 +780,7 @@ function ListingWorkbench({ id }: { id?: string }) {
   const pickerProductId = listing?.productId;
   useEffect(() => {
     if (!pickerOpen || !pickerProductId) return;
-    let cancelled = false;
+    const controller = new AbortController();
     setPickerLoading(true);
     setPickerError(null);
     setPickerSiblingSets(null);
@@ -771,22 +790,25 @@ function ListingWorkbench({ id }: { id?: string }) {
         if (pickerSourceTab === "sibling") {
           if (!pickerSiblingId) return;
           const [sets, sibling] = await Promise.all([
-            api.getListingAssetSets(pickerSiblingId),
-            api.getListing(pickerSiblingId)
+            api.getListingAssetSets(pickerSiblingId, { signal: controller.signal }),
+            api.getListing(pickerSiblingId, { signal: controller.signal })
           ]);
-          if (!cancelled) {
+          if (!controller.signal.aborted) {
             setPickerSiblingSets(sets);
             setPickerSibling(sibling);
           }
         } else {
-          const result = await api.listAssets({
-            productId: pickerSourceTab === "product" ? pickerProductId : undefined,
-            q: pickerQuery.trim() || undefined,
-            type: pickerKind === "video" ? "video" : "image",
-            page: pickerPage,
-            pageSize: PICKER_PAGE_SIZE
-          });
-          if (!cancelled) {
+          const result = await api.listAssets(
+            {
+              productId: pickerSourceTab === "product" ? pickerProductId : undefined,
+              q: pickerQuery.trim() || undefined,
+              type: pickerKind === "video" ? "video" : "image",
+              page: pickerPage,
+              pageSize: PICKER_PAGE_SIZE
+            },
+            { signal: controller.signal }
+          );
+          if (!controller.signal.aborted) {
             setPickerAssets(result.items);
             setPickerTotal(result.total);
             if (pickerPage > 1 && (pickerPage - 1) * PICKER_PAGE_SIZE >= result.total) {
@@ -795,13 +817,17 @@ function ListingWorkbench({ id }: { id?: string }) {
           }
         }
       } catch (error) {
-        if (!cancelled) setPickerError(error instanceof Error ? error.message : "加载素材失败");
+        if (!controller.signal.aborted && !isAbortError(error)) {
+          setPickerError(error instanceof Error ? error.message : "加载素材失败");
+        }
       } finally {
-        if (!cancelled) setPickerLoading(false);
+        if (!controller.signal.aborted) setPickerLoading(false);
       }
     };
     void load();
-    return () => { cancelled = true; };
+    return () => {
+      controller.abort();
+    };
   }, [pickerOpen, pickerProductId, pickerSourceTab, pickerQuery, pickerKind, pickerSiblingId, pickerPage]);
 
   const togglePickerVersion = (id: string, name: string) => {

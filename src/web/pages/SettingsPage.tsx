@@ -17,7 +17,8 @@ import type {
   BackupRecord,
   RestoreBackupResult
 } from "../../shared/types";
-import { api, ApiClientError } from "../api/client";
+import { api, ApiClientError, isAbortError } from "../api/client";
+import { LatestRequestController, startSafePolling } from "../utils/asyncControl";
 import { ConfirmDialog, type ConfirmDialogState } from "../components/ConfirmDialog";
 import { formatBytes, formatDateTime } from "../utils/format";
 
@@ -41,32 +42,57 @@ export function SettingsPage({ onTimezoneChanged }: SettingsPageProps) {
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null);
   const restoreFileInputRef = useRef<HTMLInputElement | null>(null);
 
+  const [loadReq] = useState(() => new LatestRequestController());
+  const [backupsReq] = useState(() => new LatestRequestController());
+
   const load = useCallback(async () => {
+    const req = loadReq.next();
+    backupsReq.abort();
     setError(null);
     try {
-      const [res, backupsRes] = await Promise.all([api.getSettings(), api.getBackups()]);
+      const [res, backupsRes] = await Promise.all([
+        api.getSettings({ signal: req.signal }),
+        api.getBackups({ signal: req.signal })
+      ]);
+      if (!loadReq.isCurrent(req.id)) return;
       setSettings(res);
       setBackups(backupsRes.items);
       setTrashRetentionDays(res.trashRetentionDays);
       setExportTtlHours(res.exportTtlHours);
       setAppTimezone(res.appTimezone);
     } catch (err) {
+      if (!loadReq.isCurrent(req.id) || isAbortError(err)) return;
       setError(err instanceof ApiClientError ? err.message : "加载设置失败");
+    } finally {
+      loadReq.finish(req.id);
     }
-  }, []);
+  }, [backupsReq, loadReq]);
 
   useEffect(() => {
     void load();
-  }, [load]);
+    return () => {
+      loadReq.abort();
+      backupsReq.abort();
+    };
+  }, [backupsReq, load, loadReq]);
 
   const hasCreatingBackup = backups.some((b) => b.status === "creating");
   useEffect(() => {
     if (!hasCreatingBackup) return;
-    const timer = setInterval(() => {
-      void api.getBackups().then((r) => setBackups(r.items)).catch(() => {});
+    return startSafePolling(async (signal) => {
+      if (loadReq.isInFlight()) return;
+      const req = backupsReq.next(signal);
+      try {
+        const r = await api.getBackups({ signal: req.signal });
+        if (!backupsReq.isCurrent(req.id)) return;
+        setBackups(r.items);
+      } catch (err) {
+        if (!backupsReq.isCurrent(req.id) || isAbortError(err)) return;
+      } finally {
+        backupsReq.finish(req.id);
+      }
     }, 2000);
-    return () => clearInterval(timer);
-  }, [hasCreatingBackup]);
+  }, [backupsReq, hasCreatingBackup, loadReq]);
 
   const handleCreateBackup = async (kind: BackupKind) => {
     setCreatingBackup(kind);

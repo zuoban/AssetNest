@@ -24,7 +24,8 @@ import type {
   ReleaseSummary,
   ValidationIssue
 } from "../../shared/types";
-import { api, ApiClientError } from "../api/client";
+import { api, ApiClientError, isAbortError } from "../api/client";
+import { LatestRequestController, startSafePolling } from "../utils/asyncControl";
 import { formatBytes, formatDateTime } from "../utils/format";
 import { formatValidationCode, VALIDATION_TARGET_LABELS } from "../utils/labels";
 
@@ -89,89 +90,136 @@ export function ListingReleasePanel({ listing, onFixAsset }: ListingReleasePanel
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
 
+  const [validationReq] = useState(() => new LatestRequestController());
+  const [releasesReq] = useState(() => new LatestRequestController());
+  const [detailReq] = useState(() => new LatestRequestController());
+
   const runValidation = useCallback(
-    async (templateId?: string) => {
+    async (templateId?: string, externalSignal?: AbortSignal) => {
+      const req = validationReq.next(externalSignal);
       setValidating(true);
       setError(null);
       try {
-        const res = await api.validateListing(listing.id, templateId || undefined);
+        const res = await api.validateListing(listing.id, templateId || undefined, {
+          signal: req.signal
+        });
+        if (!validationReq.isCurrent(req.id)) return;
         setValidation(res);
         if (!templateId) {
           setSelectedTemplateId(res.templateId);
         }
       } catch (err) {
+        if (!validationReq.isCurrent(req.id) || isAbortError(err)) return;
         setError(err instanceof ApiClientError ? err.message : "预检执行失败");
       } finally {
-        setValidating(false);
+        validationReq.finish(req.id);
+        if (validationReq.isCurrent(req.id)) {
+          setValidating(false);
+        }
       }
     },
-    [listing.id]
+    [listing.id, validationReq]
   );
 
-  const loadReleases = useCallback(async () => {
-    try {
-      const res = await api.listListingReleases(listing.id);
-      setReleases(res.items);
-    } catch (err) {
-      setError(err instanceof ApiClientError ? err.message : "加载历史 Release 失败");
-    }
-  }, [listing.id]);
+  const loadReleases = useCallback(
+    async (options?: { signal?: AbortSignal; silent?: boolean }) => {
+      const req = releasesReq.next(options?.signal);
+      try {
+        const res = await api.listListingReleases(listing.id, { signal: req.signal });
+        if (!releasesReq.isCurrent(req.id)) return;
+        setReleases(res.items);
+      } catch (err) {
+        if (!releasesReq.isCurrent(req.id) || isAbortError(err)) return;
+        if (!options?.silent) {
+          setError(err instanceof ApiClientError ? err.message : "加载历史 Release 失败");
+        }
+      } finally {
+        releasesReq.finish(req.id);
+      }
+    },
+    [listing.id, releasesReq]
+  );
 
   useEffect(() => {
-    let cancelled = false;
+    const controller = new AbortController();
+    setExpandedReleaseId(null);
+    setReleaseDetailsMap({});
+    setValidation(null);
+    setValidating(false);
+
     async function init() {
+      const relReq = releasesReq.next(controller.signal);
+      let tplRes: { items: ExportTemplateRecord[] };
+      let relRes: { items: ReleaseSummary[] };
       try {
-        const [tplRes, relRes] = await Promise.all([
-          api.listExportTemplates(),
-          api.listListingReleases(listing.id)
+        [tplRes, relRes] = await Promise.all([
+          api.listExportTemplates(undefined, { signal: controller.signal }),
+          api.listListingReleases(listing.id, { signal: relReq.signal })
         ]);
-        if (cancelled) return;
-        setTemplates(tplRes.items);
-        setReleases(relRes.items);
-        const preferred =
-          tplRes.items.find(
-            (t) => t.platform === listing.platform && t.market === listing.market && t.isDefault
-          ) ??
-          tplRes.items.find(
-            (t) => t.platform === listing.platform && t.market === listing.market
-          ) ??
-          tplRes.items[0];
-        if (preferred) {
-          setSelectedTemplateId(preferred.id);
-          await runValidation(preferred.id);
-        } else {
-          await runValidation();
-        }
       } catch (err) {
-        if (!cancelled) {
+        if (!controller.signal.aborted && !isAbortError(err)) {
           setError(err instanceof ApiClientError ? err.message : "加载发布模块失败");
         }
+        return;
+      } finally {
+        releasesReq.finish(relReq.id);
+      }
+
+      if (controller.signal.aborted || !releasesReq.isCurrent(relReq.id)) return;
+      setTemplates(tplRes.items);
+      setReleases(relRes.items);
+      const preferred =
+        tplRes.items.find(
+          (t) => t.platform === listing.platform && t.market === listing.market && t.isDefault
+        ) ??
+        tplRes.items.find(
+          (t) => t.platform === listing.platform && t.market === listing.market
+        ) ??
+        tplRes.items[0];
+      if (preferred) {
+        setSelectedTemplateId(preferred.id);
+        await runValidation(preferred.id, controller.signal);
+      } else {
+        await runValidation(undefined, controller.signal);
       }
     }
     void init();
     return () => {
-      cancelled = true;
+      controller.abort();
+      validationReq.abort();
+      releasesReq.abort();
+      detailReq.abort();
     };
-  }, [listing.id, listing.market, listing.platform, runValidation]);
+  }, [detailReq, listing.id, listing.market, listing.platform, releasesReq, runValidation, validationReq]);
 
   const hasRunningExport = releases.some(
     (rel) => rel.latestExport?.status === "queued" || rel.latestExport?.status === "running"
   );
   useEffect(() => {
     if (!hasRunningExport) return;
-    const timer = setInterval(() => {
-      void loadReleases();
-      if (expandedReleaseId) {
-        void api
-          .getReleaseDetail(expandedReleaseId)
-          .then((detail) =>
-            setReleaseDetailsMap((prev) => ({ ...prev, [expandedReleaseId]: detail }))
-          )
-          .catch(() => {});
+    return startSafePolling(async (signal) => {
+      const tasks: Array<Promise<void>> = [
+        releasesReq.isInFlight() ? Promise.resolve() : loadReleases({ signal, silent: true })
+      ];
+      if (expandedReleaseId && !detailReq.isInFlight()) {
+        const targetReleaseId = expandedReleaseId;
+        const req = detailReq.next(signal);
+        tasks.push(
+          api
+            .getReleaseDetail(targetReleaseId, { signal: req.signal })
+            .then((detail) => {
+              if (!detailReq.isCurrent(req.id)) return;
+              setReleaseDetailsMap((prev) => ({ ...prev, [targetReleaseId]: detail }));
+            })
+            .catch(() => {})
+            .finally(() => {
+              detailReq.finish(req.id);
+            })
+        );
       }
+      await Promise.all(tasks);
     }, 1500);
-    return () => clearInterval(timer);
-  }, [expandedReleaseId, hasRunningExport, loadReleases]);
+  }, [detailReq, expandedReleaseId, hasRunningExport, loadReleases, releasesReq]);
 
   const handleCreateRelease = async (isDraftPackage: boolean) => {
     setCreatingMode(isDraftPackage ? "draft" : "formal");
@@ -218,15 +266,21 @@ export function ListingReleasePanel({ listing, onFixAsset }: ListingReleasePanel
 
   const handleToggleDetails = async (releaseId: string) => {
     if (expandedReleaseId === releaseId) {
+      detailReq.abort();
       setExpandedReleaseId(null);
       return;
     }
     setExpandedReleaseId(releaseId);
+    const req = detailReq.next();
     try {
-      const detail = await api.getReleaseDetail(releaseId);
+      const detail = await api.getReleaseDetail(releaseId, { signal: req.signal });
+      if (!detailReq.isCurrent(req.id)) return;
       setReleaseDetailsMap((prev) => ({ ...prev, [releaseId]: detail }));
     } catch (err) {
+      if (!detailReq.isCurrent(req.id) || isAbortError(err)) return;
       setError(err instanceof ApiClientError ? err.message : "加载 Release 详情失败");
+    } finally {
+      detailReq.finish(req.id);
     }
   };
 
