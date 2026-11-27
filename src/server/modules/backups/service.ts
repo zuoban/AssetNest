@@ -2,7 +2,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
-import { PassThrough } from "node:stream";
+import { DatabaseSync } from "node:sqlite";
+import { PassThrough, Readable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import yazl from "yazl";
 import type { BackupKind, BackupRecord } from "../../../shared/types.js";
@@ -12,7 +13,7 @@ import { getCurrentSchemaVersion } from "../../db/migrator.js";
 import { AppError } from "../../http/errors.js";
 import type { StorageRegistry } from "../../storage/registry.js";
 import { enqueueJob } from "../jobs/service.js";
-import type { JobContext, JobWorker } from "../jobs/worker.js";
+import { JobCancelledError, type JobContext, type JobWorker } from "../jobs/worker.js";
 import { recordActivity } from "../system/activity.js";
 
 interface BackupRow {
@@ -58,14 +59,65 @@ function resolveBackupZipPath(config: ResolvedAppConfig, relativeName: string): 
   return resolved;
 }
 
-async function hashFileSha256(filePath: string): Promise<{ sha256: string; sizeBytes: number }> {
+interface BackupSourceFileRow {
+  id: string;
+  storage_id: string;
+  object_key: string;
+  sha256: string;
+  size_bytes: number;
+  mime_type: string;
+}
+
+function destroyReadableSafely(stream: NodeJS.ReadableStream): void {
+  const candidate = stream as NodeJS.ReadableStream & {
+    destroyed?: boolean;
+    destroy?: () => void;
+    on?: (event: string, listener: (...args: unknown[]) => void) => unknown;
+    listenerCount?: (event: string) => number;
+  };
+  if (
+    typeof candidate.on === "function" &&
+    (typeof candidate.listenerCount !== "function" || candidate.listenerCount("error") === 0)
+  ) {
+    candidate.on("error", () => {});
+  }
+  if (typeof candidate.destroy === "function" && !candidate.destroyed) {
+    candidate.destroy();
+  }
+}
+
+function readReadyFilesFromSnapshot(snapshotDbPath: string): BackupSourceFileRow[] {
+  const snapshotDb = new DatabaseSync(snapshotDbPath, { readOnly: true });
+  try {
+    return snapshotDb
+      .prepare(
+        `SELECT id, storage_id, object_key, sha256, size_bytes, mime_type
+         FROM files
+         WHERE state = 'ready'
+         ORDER BY storage_id ASC, object_key ASC`
+      )
+      .all() as unknown as BackupSourceFileRow[];
+  } finally {
+    snapshotDb.close();
+  }
+}
+
+async function hashFileSha256(
+  filePath: string,
+  throwIfCancelled?: () => void
+): Promise<{ sha256: string; sizeBytes: number }> {
   const hash = crypto.createHash("sha256");
   let sizeBytes = 0;
   const stream = fs.createReadStream(filePath);
-  for await (const chunk of stream) {
-    const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
-    sizeBytes += buf.length;
-    hash.update(buf);
+  try {
+    for await (const chunk of stream) {
+      throwIfCancelled?.();
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+      sizeBytes += buf.length;
+      hash.update(buf);
+    }
+  } finally {
+    destroyReadableSafely(stream);
   }
   return { sha256: hash.digest("hex"), sizeBytes };
 }
@@ -199,52 +251,122 @@ export async function executeBackupJob(
     config.uploads.tempDir,
     `backup-snapshot-${backupId}-${crypto.randomUUID()}.sqlite`
   );
-  const stagedTempFiles: string[] = [];
+
+  let zipPipelinePromise: Promise<{ sha256: string; sizeBytes: number }> | null = null;
+  let abortZip: ((err: unknown) => void) | null = null;
+  let zipOutputStream: Readable | null = null;
+
+  const onContextAbort = () => {
+    abortZip?.(new JobCancelledError());
+  };
+  ctx.signal.addEventListener("abort", onContextAbort, { once: true });
 
   try {
     ctx.throwIfCancelled();
+    db.raw
+      .prepare("UPDATE backups SET status = 'creating', last_error = NULL WHERE id = ?")
+      .run(backupId);
+
     ctx.updateProgress({ stage: "snapshotting_database", current: 0, total: 1 });
 
     // SQLite consistent snapshot via VACUUM INTO (must run outside transaction)
     const escapedSnapshotPath = snapshotDbPath.replace(/'/g, "''");
     db.raw.exec(`VACUUM INTO '${escapedSnapshotPath}';`);
 
-    const dbHashInfo = await hashFileSha256(snapshotDbPath);
+    const dbHashInfo = await hashFileSha256(snapshotDbPath, () => ctx.throwIfCancelled());
+    ctx.throwIfCancelled();
 
+    // Read ready file list from the point-in-time DB snapshot so manifest & DB stay consistent
     const filesToInclude =
-      kind === "full"
-        ? (db.raw
-            .prepare(
-              `SELECT id, storage_id, object_key, sha256, size_bytes, mime_type
-               FROM files
-               WHERE state = 'ready'
-               ORDER BY storage_id ASC, object_key ASC`
-            )
-            .all() as Array<{
-            id: string;
-            storage_id: string;
-            object_key: string;
-            sha256: string;
-            size_bytes: number;
-            mime_type: string;
-          }>)
-        : [];
+      kind === "full" ? readReadyFilesFromSnapshot(snapshotDbPath) : [];
 
-    const totalSteps = filesToInclude.length + 2;
+    // Pre-validate storage providers before creating temp ZIP or streaming any objects
+    const resolvedFiles = filesToInclude.map((file) => {
+      const provider = storageRegistry.get(file.storage_id);
+      if (!provider) {
+        throw new Error(
+          `完整备份失败：文件 ${file.id} 所在存储空间 "${file.storage_id}" 当前离线或缺少配置`
+        );
+      }
+      return {
+        file,
+        provider,
+        zipEntryPath: `files/${file.storage_id}/${file.object_key}`
+      };
+    });
+
+    const totalSteps = resolvedFiles.length + 2;
     ctx.updateProgress({ stage: "packaging_backup", current: 1, total: totalSteps });
 
-    const manifestFiles: Array<{
-      fileId: string;
-      storageId: string;
-      objectKey: string;
-      zipPath: string;
-      sha256: string;
-      sizeBytes: number;
-      mimeType: string;
-    }> = [];
+    const manifestFiles = resolvedFiles.map(({ file, zipEntryPath }) => ({
+      fileId: file.id,
+      storageId: file.storage_id,
+      objectKey: file.object_key,
+      zipPath: zipEntryPath,
+      sha256: file.sha256,
+      sizeBytes: Number(file.size_bytes),
+      mimeType: file.mime_type
+    }));
+
+    const streamAbortController = new AbortController();
+    const activeStreams = new Set<NodeJS.ReadableStream>();
+    let zipAborted = false;
+    let zipAbortError: Error | null = null;
 
     const zipFile = new yazl.ZipFile();
-    const zipOutputDone = (async () => {
+    const zipOutput = zipFile.outputStream as Readable;
+    zipOutputStream = zipOutput;
+
+    abortZip = (rawErr: unknown) => {
+      const err = rawErr instanceof Error ? rawErr : new Error(String(rawErr));
+      if (zipAborted) {
+        return;
+      }
+      zipAborted = true;
+      zipAbortError = err;
+
+      if (!streamAbortController.signal.aborted) {
+        streamAbortController.abort(err);
+      }
+
+      if (!(zipFile as unknown as { errored?: boolean }).errored) {
+        zipFile.emit("error", err);
+      }
+
+      const toDestroy = Array.from(activeStreams);
+      activeStreams.clear();
+      for (const stream of toDestroy) {
+        destroyReadableSafely(stream);
+      }
+
+      if (!zipOutput.destroyed) {
+        zipOutput.destroy(err);
+      }
+    };
+
+    zipFile.on("error", abortZip);
+
+    ctx.throwIfCancelled();
+
+    const createManagedLazyStream = (
+      factory: () => AsyncGenerator<Buffer, void, void>
+    ): Readable => {
+      const stream = Readable.from(factory());
+      activeStreams.add(stream);
+      const cleanup = () => {
+        activeStreams.delete(stream);
+      };
+      stream.once("close", cleanup);
+      stream.once("end", cleanup);
+      stream.on("error", (err) => {
+        cleanup();
+        abortZip?.(err);
+      });
+      return stream;
+    };
+
+    // Start consuming zipOutput before registering entries so error handlers and backpressure are active immediately
+    zipPipelinePromise = (async () => {
       const hash = crypto.createHash("sha256");
       let zipSize = 0;
       const pass = new PassThrough();
@@ -253,64 +375,92 @@ export async function executeBackupJob(
         hash.update(chunk);
       });
       const writer = fs.createWriteStream(tempZipPath);
-      await pipeline(zipFile.outputStream, pass, writer);
+      try {
+        await pipeline(zipOutput, pass, writer);
+      } catch (pipeErr) {
+        abortZip?.(pipeErr);
+        throw zipAbortError ?? pipeErr;
+      }
       return { sha256: hash.digest("hex"), sizeBytes: zipSize };
     })();
 
-    zipFile.addFile(snapshotDbPath, "assetnest.db");
-
-    for (let index = 0; index < filesToInclude.length; index += 1) {
-      const file = filesToInclude[index]!;
+    // Stream SQLite snapshot lazily so its file descriptor is tracked and closed immediately on abort
+    const dbLazyStream = createManagedLazyStream(async function* () {
+      if (zipAborted) return;
       ctx.throwIfCancelled();
-
-      const provider = storageRegistry.get(file.storage_id);
-      if (!provider) {
-        throw new Error(
-          `完整备份失败：文件 ${file.id} 所在存储空间 "${file.storage_id}" 当前离线或缺少配置`
-        );
+      const dbStream = fs.createReadStream(snapshotDbPath);
+      activeStreams.add(dbStream);
+      try {
+        for await (const chunk of dbStream) {
+          if (zipAborted) return;
+          ctx.throwIfCancelled();
+          yield Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+        }
+      } finally {
+        activeStreams.delete(dbStream);
+        destroyReadableSafely(dbStream);
       }
+    });
+    zipFile.addReadStream(dbLazyStream, "assetnest.db");
 
-      // Stage each remote/local file into temp while verifying SHA-256 so corrupted objects fail early
-      const stagedPath = path.join(
-        config.uploads.tempDir,
-        `backup-file-${backupId}-${index}-${crypto.randomUUID()}.part`
-      );
-      stagedTempFiles.push(stagedPath);
+    // Lazy sequential streaming: each object is streamed directly from storage into the ZIP
+    // while computing SHA-256 and byte count on the fly — avoiding per-file temp copies on disk
+    for (let index = 0; index < resolvedFiles.length; index += 1) {
+      const { file, provider, zipEntryPath } = resolvedFiles[index]!;
+      const expectedSize = Number(file.size_bytes);
+      const expectedSha = file.sha256;
 
-      const readRes = await provider.get(file.object_key, { signal: ctx.signal });
-      const fileHash = crypto.createHash("sha256");
-      let byteCount = 0;
-      const out = fs.createWriteStream(stagedPath);
-      readRes.stream.on("data", (chunk: Buffer) => {
-        byteCount += chunk.length;
-        fileHash.update(chunk);
+      const fileLazyStream = createManagedLazyStream(async function* () {
+        if (zipAborted) return;
+        ctx.throwIfCancelled();
+
+        const readRes = await provider.get(file.object_key, {
+          signal: streamAbortController.signal
+        });
+        const sourceStream = readRes.stream;
+        activeStreams.add(sourceStream);
+
+        const fileHash = crypto.createHash("sha256");
+        let byteCount = 0;
+
+        try {
+          if (zipAborted) return;
+          for await (const chunk of sourceStream) {
+            if (zipAborted) return;
+            ctx.throwIfCancelled();
+            const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk as Uint8Array);
+            byteCount += buf.length;
+            if (byteCount > expectedSize) {
+              throw new Error(
+                `完整备份完整性校验失败（file=${file.id}, expectedSize=${expectedSize}, actualSize>${expectedSize}）`
+              );
+            }
+            fileHash.update(buf);
+            yield buf;
+          }
+        } finally {
+          activeStreams.delete(sourceStream);
+          destroyReadableSafely(sourceStream);
+        }
+
+        if (zipAborted) return;
+        ctx.throwIfCancelled();
+
+        const actualSha = fileHash.digest("hex");
+        if (byteCount !== expectedSize || actualSha !== expectedSha) {
+          throw new Error(
+            `完整备份完整性校验失败（file=${file.id}, expected=${expectedSha}, actual=${actualSha}）`
+          );
+        }
+
+        ctx.updateProgress({
+          stage: "packaging_backup",
+          current: index + 2,
+          total: totalSteps
+        });
       });
-      await pipeline(readRes.stream, out);
 
-      const actualSha = fileHash.digest("hex");
-      if (byteCount !== Number(file.size_bytes) || actualSha !== file.sha256) {
-        throw new Error(
-          `完整备份完整性校验失败（file=${file.id}, expected=${file.sha256}, actual=${actualSha}）`
-        );
-      }
-
-      const zipEntryPath = `files/${file.storage_id}/${file.object_key}`;
-      zipFile.addFile(stagedPath, zipEntryPath, { compress: false });
-      manifestFiles.push({
-        fileId: file.id,
-        storageId: file.storage_id,
-        objectKey: file.object_key,
-        zipPath: zipEntryPath,
-        sha256: file.sha256,
-        sizeBytes: Number(file.size_bytes),
-        mimeType: file.mime_type
-      });
-
-      ctx.updateProgress({
-        stage: "packaging_backup",
-        current: index + 2,
-        total: totalSteps
-      });
+      zipFile.addReadStream(fileLazyStream, zipEntryPath, { compress: false });
     }
 
     const manifest = {
@@ -332,7 +482,9 @@ export async function executeBackupJob(
     zipFile.addBuffer(Buffer.from(JSON.stringify(manifest, null, 2), "utf8"), "manifest.json");
     zipFile.end();
 
-    const zipInfo = await zipOutputDone;
+    const zipInfo = await zipPipelinePromise;
+    ctx.throwIfCancelled();
+
     await fsp.rename(tempZipPath, finalZipPath);
 
     db.raw
@@ -358,6 +510,10 @@ export async function executeBackupJob(
       dbSha256: dbHashInfo.sha256
     };
   } catch (err) {
+    abortZip?.(err);
+    if (zipPipelinePromise) {
+      await zipPipelinePromise.catch(() => {});
+    }
     const message = err instanceof Error ? err.message : String(err);
     db.raw
       .prepare("UPDATE backups SET status = 'failed', last_error = ? WHERE id = ?")
@@ -365,9 +521,13 @@ export async function executeBackupJob(
     await fsp.rm(tempZipPath, { force: true }).catch(() => {});
     throw err;
   } finally {
-    await fsp.rm(snapshotDbPath, { force: true }).catch(() => {});
-    for (const staged of stagedTempFiles) {
-      await fsp.rm(staged, { force: true }).catch(() => {});
+    ctx.signal.removeEventListener("abort", onContextAbort);
+    if (zipPipelinePromise) {
+      await zipPipelinePromise.catch(() => {});
     }
+    if (zipOutputStream) {
+      zipOutputStream.on("error", () => {});
+    }
+    await fsp.rm(snapshotDbPath, { force: true }).catch(() => {});
   }
 }
