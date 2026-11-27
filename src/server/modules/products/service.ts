@@ -15,6 +15,7 @@ import { AppError } from "../../http/errors.js";
 import {
   buildEntitySearchClause,
   rebuildProductLinkedAssetSearchDocuments,
+  rebuildProductLinkedListingSearchDocuments,
   rebuildProductSearchDocument
 } from "../search/service.js";
 import { recordActivity } from "../system/activity.js";
@@ -519,6 +520,7 @@ export function updateProduct(
 
       rebuildProductSearchDocument(db, productId);
       rebuildProductLinkedAssetSearchDocuments(db, productId);
+      rebuildProductLinkedListingSearchDocuments(db, productId);
       recordActivity(db, {
         actorUserId,
         action: "product.update",

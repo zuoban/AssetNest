@@ -43,6 +43,11 @@ import { verifyCsrfHeaderAndOrigin } from "./security.js";
 
 export const APP_VERSION = "0.2.0";
 
+function extractRequestPathname(rawUrl: string): string {
+  const endIndex = rawUrl.search(/[?#]/);
+  return endIndex >= 0 ? rawUrl.slice(0, endIndex) : rawUrl;
+}
+
 export interface CreateAppOptions {
   config: ResolvedAppConfig;
   acquireInstanceLock?: boolean;
@@ -84,199 +89,225 @@ export async function createApp(options: CreateAppOptions): Promise<AppRuntime> 
     acquireInstanceLock
   });
 
+  let app: FastifyInstance | null = null;
   try {
     runMigrations(db);
     syncSystemBootstrapState(db, config);
+
+    const storageRegistry = new StorageRegistry(config);
+    let maintenanceMode = false;
+
+    app = Fastify({
+      logger: logger
+        ? {
+            level: process.env.LOG_LEVEL || "info",
+            redact: {
+              paths: [
+                "req.headers.cookie",
+                "req.headers.authorization",
+                "*.accessCode",
+                "*.password",
+                "*.secretAccessKey",
+                "*.token",
+                "*.signedUrl"
+              ],
+              censor: "[REDACTED]"
+            }
+          }
+        : false
+    });
+
+    const worker = new JobWorker(db, {
+      concurrency: config.worker.concurrency,
+      pollIntervalMs: workerPollIntervalMs,
+      retryBaseDelayMs: workerRetryBaseDelayMs,
+      onError: (err, jobId) => {
+        app!.log.error({ err, jobId }, "Background job error");
+      }
+    });
+
+    worker.registerHandler("storage_migrate", (payload, ctx) =>
+      executeStorageMigrationJob(db, config, storageRegistry, payload, ctx)
+    );
+    worker.registerHandler("storage_cleanup", (payload, ctx) =>
+      executeStorageCleanupJob(db, storageRegistry, payload, ctx)
+    );
+    worker.registerHandler("gc", (payload, ctx) =>
+      executeGcJob(db, config, storageRegistry, payload, ctx)
+    );
+    worker.registerHandler("backup", (payload, ctx) =>
+      executeBackupJob(db, config, storageRegistry, APP_VERSION, payload, ctx)
+    );
+    worker.registerHandler("export_zip", (payload, ctx) =>
+      executeReleaseExportJob(db, config, storageRegistry, payload, ctx)
+    );
+    worker.registerHandler("thumbnail", async (payload) => {
+      const assetId = String(payload.assetId ?? "");
+      const versionId = String(payload.versionId ?? "");
+      if (!assetId || !versionId) {
+        return { skipped: true };
+      }
+      const versionInfo = resolveAssetVersionFile(db, assetId, versionId);
+      const res = await ensureThumbnailReady(db, config, storageRegistry, versionInfo, false);
+      return { thumbStatus: res.thumbStatus, regenerated: res.regenerated };
+    });
+    worker.registerHandler("search_reindex", async (payload) => {
+      const entityType = payload.entityType;
+      const entityId = String(payload.entityId ?? "");
+      if (entityType === "asset" && entityId) {
+        rebuildAssetSearchDocument(db, entityId);
+      } else if (entityType === "product" && entityId) {
+        rebuildProductSearchDocument(db, entityId);
+      } else if (entityType === "listing" && entityId) {
+        rebuildListingSearchDocument(db, entityId);
+      }
+      return { reindexed: true };
+    });
+
+    await app.register(cookie);
+    await app.register(multipart, {
+      limits: {
+        fileSize: config.uploads.maxFileSizeMB * 1024 * 1024,
+        files: 50,
+        fields: 50
+      }
+    });
+    await app.register(rateLimit, {
+      global: false
+    });
+
+    registerErrorHandler(app);
+
+    app.addHook("onSend", async (_request, reply, payload) => {
+      reply.header("X-Content-Type-Options", "nosniff");
+      reply.header("X-Frame-Options", "DENY");
+      reply.header("Referrer-Policy", "same-origin");
+      return payload;
+    });
+
+    app.addHook("onRequest", async (request) => {
+      const pathname = extractRequestPathname(request.url);
+      const isHealthProbe =
+        (request.method === "GET" || request.method === "HEAD") && pathname === "/healthz";
+      if (maintenanceMode && !isHealthProbe) {
+        throw new AppError(503, "MAINTENANCE_MODE", "系统正在执行维护恢复，请稍候重试");
+      }
+      if (pathname === "/api" || pathname.startsWith("/api/")) {
+        verifyCsrfHeaderAndOrigin(request);
+      }
+    });
+
+    app.get("/healthz", async (): Promise<HealthResponse> => {
+      let dbReady = false;
+      try {
+        db.raw.prepare("SELECT 1").get();
+        dbReady = true;
+      } catch {
+        dbReady = false;
+      }
+      return {
+        status: maintenanceMode ? "maintenance" : "ok",
+        initialized: dbReady,
+        dbReady,
+        authEnabled: isAuthEnabled(config),
+        version: APP_VERSION
+      };
+    });
+
+    registerAuthRoutes(app, {
+      db,
+      config,
+      version: APP_VERSION,
+      loginRateLimitMax
+    });
+    registerSystemRoutes(app, db, config);
+    registerJobRoutes(app, db, config, worker);
+    registerStorageOpsRoutes(app, db, config, storageRegistry, worker);
+    registerBackupRoutes(app, db, config, storageRegistry, worker, (enabled) => {
+      maintenanceMode = enabled;
+    });
+    registerProductRoutes(app, db, config);
+    registerTaxonomyRoutes(app, db, config);
+    registerAssetRoutes(app, db, config, storageRegistry);
+    registerListingRoutes(app, db, config);
+    registerReleaseRoutes(app, db, config, storageRegistry, worker);
+    registerTrashRoutes(app, db, config, worker);
+
+    app.all("/api/*", async () => {
+      throw new AppError(404, "NOT_FOUND", "请求的 API 接口不存在");
+    });
+
+    if (fs.existsSync(path.join(webDistDir, "index.html"))) {
+      await app.register(fastifyStatic, {
+        root: webDistDir,
+        prefix: "/",
+        wildcard: false
+      });
+
+      app.setNotFoundHandler((request, reply) => {
+        const pathname = extractRequestPathname(request.url);
+        if (request.method === "GET" && pathname !== "/api" && !pathname.startsWith("/api/")) {
+          return reply.sendFile("index.html");
+        }
+        return reply.status(404).send({
+          error: {
+            code: "NOT_FOUND",
+            message: "资源不存在"
+          }
+        });
+      });
+    }
+
+    if (startWorker) {
+      worker.start();
+    }
+
+    const initializedApp = app;
+    let closePromise: Promise<void> | null = null;
+    function close(): Promise<void> {
+      if (closePromise) {
+        return closePromise;
+      }
+      closePromise = (async () => {
+        let firstError: unknown;
+        try {
+          await initializedApp.close();
+        } catch (err) {
+          firstError = err;
+        }
+        try {
+          await worker.stop();
+        } catch (err) {
+          firstError ??= err;
+        }
+        try {
+          db.close();
+        } catch (err) {
+          firstError ??= err;
+        }
+        if (firstError !== undefined) {
+          throw firstError;
+        }
+      })();
+      return closePromise;
+    }
+
+    return {
+      app: initializedApp,
+      db,
+      config,
+      storageRegistry,
+      worker,
+      setMaintenanceMode(enabled: boolean) {
+        maintenanceMode = enabled;
+      },
+      close
+    };
   } catch (err) {
+    if (app) {
+      await app.close().catch(() => {});
+    }
     db.close();
     throw err;
   }
-
-  const storageRegistry = new StorageRegistry(config);
-  let maintenanceMode = false;
-
-  const app = Fastify({
-    logger: logger
-      ? {
-          level: process.env.LOG_LEVEL || "info",
-          redact: {
-            paths: [
-              "req.headers.cookie",
-              "req.headers.authorization",
-              "*.accessCode",
-              "*.password",
-              "*.secretAccessKey",
-              "*.token",
-              "*.signedUrl"
-            ],
-            censor: "[REDACTED]"
-          }
-        }
-      : false
-  });
-
-  const worker = new JobWorker(db, {
-    concurrency: config.worker.concurrency,
-    pollIntervalMs: workerPollIntervalMs,
-    retryBaseDelayMs: workerRetryBaseDelayMs,
-    onError: (err, jobId) => {
-      app.log.error({ err, jobId }, "Background job error");
-    }
-  });
-
-  worker.registerHandler("storage_migrate", (payload, ctx) =>
-    executeStorageMigrationJob(db, config, storageRegistry, payload, ctx)
-  );
-  worker.registerHandler("storage_cleanup", (payload, ctx) =>
-    executeStorageCleanupJob(db, storageRegistry, payload, ctx)
-  );
-  worker.registerHandler("gc", (payload, ctx) =>
-    executeGcJob(db, config, storageRegistry, payload, ctx)
-  );
-  worker.registerHandler("backup", (payload, ctx) =>
-    executeBackupJob(db, config, storageRegistry, APP_VERSION, payload, ctx)
-  );
-  worker.registerHandler("export_zip", (payload, ctx) =>
-    executeReleaseExportJob(db, config, storageRegistry, payload, ctx)
-  );
-  worker.registerHandler("thumbnail", async (payload) => {
-    const assetId = String(payload.assetId ?? "");
-    const versionId = String(payload.versionId ?? "");
-    if (!assetId || !versionId) {
-      return { skipped: true };
-    }
-    const versionInfo = resolveAssetVersionFile(db, assetId, versionId);
-    const res = await ensureThumbnailReady(db, config, storageRegistry, versionInfo, false);
-    return { thumbStatus: res.thumbStatus, regenerated: res.regenerated };
-  });
-  worker.registerHandler("search_reindex", async (payload) => {
-    const entityType = payload.entityType;
-    const entityId = String(payload.entityId ?? "");
-    if (entityType === "asset" && entityId) {
-      rebuildAssetSearchDocument(db, entityId);
-    } else if (entityType === "product" && entityId) {
-      rebuildProductSearchDocument(db, entityId);
-    } else if (entityType === "listing" && entityId) {
-      rebuildListingSearchDocument(db, entityId);
-    }
-    return { reindexed: true };
-  });
-
-  await app.register(cookie);
-  await app.register(multipart, {
-    limits: {
-      fileSize: config.uploads.maxFileSizeMB * 1024 * 1024,
-      files: 50,
-      fields: 50
-    }
-  });
-  await app.register(rateLimit, {
-    global: false
-  });
-
-  registerErrorHandler(app);
-
-  app.addHook("onSend", async (_request, reply, payload) => {
-    reply.header("X-Content-Type-Options", "nosniff");
-    reply.header("X-Frame-Options", "DENY");
-    reply.header("Referrer-Policy", "same-origin");
-    return payload;
-  });
-
-  app.addHook("onRequest", async (request) => {
-    if (maintenanceMode && request.url !== "/healthz") {
-      throw new AppError(503, "MAINTENANCE_MODE", "系统正在执行维护恢复，请稍候重试");
-    }
-    if (request.url.startsWith("/api/")) {
-      verifyCsrfHeaderAndOrigin(request);
-    }
-  });
-
-  app.get("/healthz", async (): Promise<HealthResponse> => {
-    let dbReady = false;
-    try {
-      db.raw.prepare("SELECT 1").get();
-      dbReady = true;
-    } catch {
-      dbReady = false;
-    }
-    return {
-      status: maintenanceMode ? "maintenance" : "ok",
-      initialized: dbReady,
-      dbReady,
-      authEnabled: isAuthEnabled(config),
-      version: APP_VERSION
-    };
-  });
-
-  registerAuthRoutes(app, {
-    db,
-    config,
-    version: APP_VERSION,
-    loginRateLimitMax
-  });
-  registerSystemRoutes(app, db, config);
-  registerJobRoutes(app, db, config, worker);
-  registerStorageOpsRoutes(app, db, config, storageRegistry, worker);
-  registerBackupRoutes(app, db, config, storageRegistry, worker, (enabled) => {
-    maintenanceMode = enabled;
-  });
-  registerProductRoutes(app, db, config);
-  registerTaxonomyRoutes(app, db, config);
-  registerAssetRoutes(app, db, config, storageRegistry);
-  registerListingRoutes(app, db, config);
-  registerReleaseRoutes(app, db, config, storageRegistry, worker);
-  registerTrashRoutes(app, db, config, worker);
-
-  app.all("/api/*", async () => {
-    throw new AppError(404, "NOT_FOUND", "请求的 API 接口不存在");
-  });
-
-  if (fs.existsSync(path.join(webDistDir, "index.html"))) {
-    await app.register(fastifyStatic, {
-      root: webDistDir,
-      prefix: "/",
-      wildcard: false
-    });
-
-    app.setNotFoundHandler((request, reply) => {
-      if (request.method === "GET" && !request.url.startsWith("/api/")) {
-        return reply.sendFile("index.html");
-      }
-      return reply.status(404).send({
-        error: {
-          code: "NOT_FOUND",
-          message: "资源不存在"
-        }
-      });
-    });
-  }
-
-  if (startWorker) {
-    worker.start();
-  }
-
-  let closed = false;
-  async function close(): Promise<void> {
-    if (closed) return;
-    closed = true;
-    try {
-      await worker.stop();
-      await app.close();
-    } finally {
-      db.close();
-    }
-  }
-
-  return {
-    app,
-    db,
-    config,
-    storageRegistry,
-    worker,
-    setMaintenanceMode(enabled: boolean) {
-      maintenanceMode = enabled;
-    },
-    close
-  };
 }

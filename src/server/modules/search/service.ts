@@ -183,10 +183,48 @@ export function rebuildAssetSearchDocument(db: AppDatabase, assetId: string): vo
 
 export function rebuildProductLinkedAssetSearchDocuments(db: AppDatabase, productId: string): void {
   const rows = db.raw
-    .prepare("SELECT asset_id FROM product_assets WHERE product_id = ?")
+    .prepare(
+      `SELECT pa.asset_id
+       FROM product_assets pa
+       JOIN assets a ON a.id = pa.asset_id
+       WHERE pa.product_id = ? AND a.deleted_at IS NULL`
+    )
     .all(productId) as Array<{ asset_id: string }>;
   for (const row of rows) {
     rebuildAssetSearchDocument(db, row.asset_id);
+  }
+}
+
+export function rebuildProductLinkedListingSearchDocuments(
+  db: AppDatabase,
+  productId: string
+): void {
+  const exists = db.raw
+    .prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'listings'")
+    .get() as { ok: number } | undefined;
+  if (!exists) {
+    return;
+  }
+  const rows = db.raw
+    .prepare("SELECT id FROM listings WHERE product_id = ? AND deleted_at IS NULL")
+    .all(productId) as Array<{ id: string }>;
+  for (const row of rows) {
+    rebuildListingSearchDocument(db, row.id);
+  }
+}
+
+export function rebuildStoreLinkedListingSearchDocuments(db: AppDatabase, storeId: string): void {
+  const exists = db.raw
+    .prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'listings'")
+    .get() as { ok: number } | undefined;
+  if (!exists) {
+    return;
+  }
+  const rows = db.raw
+    .prepare("SELECT id FROM listings WHERE store_id = ? AND deleted_at IS NULL")
+    .all(storeId) as Array<{ id: string }>;
+  for (const row of rows) {
+    rebuildListingSearchDocument(db, row.id);
   }
 }
 

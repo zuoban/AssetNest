@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import type { StoreRecord, StoreStatus } from "../../../shared/types.js";
 import type { AppDatabase } from "../../db/database.js";
 import { AppError } from "../../http/errors.js";
+import { rebuildStoreLinkedListingSearchDocuments } from "../search/service.js";
 import { recordActivity } from "../system/activity.js";
 
 interface StoreRow {
@@ -161,18 +162,19 @@ export function updateStore(
   storeId: string,
   input: UpdateStoreInput
 ): StoreRecord {
-  const existing = getStoreById(db, storeId);
   const now = new Date().toISOString();
 
-  const nextName = input.name !== undefined ? input.name.trim() : existing.name;
-  const nextPlatform = input.platform !== undefined ? input.platform.trim() : existing.platform;
-  const nextMarket = input.market !== undefined ? input.market.trim() : existing.market;
-  const nextLang =
-    input.defaultLanguage !== undefined ? input.defaultLanguage.trim() : existing.defaultLanguage;
-  const nextStatus = input.status ?? existing.status;
-  const nextNotes = input.notes !== undefined ? input.notes.trim() : existing.notes;
-
   db.transaction(() => {
+    const existing = getStoreById(db, storeId);
+
+    const nextName = input.name !== undefined ? input.name.trim() : existing.name;
+    const nextPlatform = input.platform !== undefined ? input.platform.trim() : existing.platform;
+    const nextMarket = input.market !== undefined ? input.market.trim() : existing.market;
+    const nextLang =
+      input.defaultLanguage !== undefined ? input.defaultLanguage.trim() : existing.defaultLanguage;
+    const nextStatus = input.status ?? existing.status;
+    const nextNotes = input.notes !== undefined ? input.notes.trim() : existing.notes;
+
     db.raw
       .prepare(
         `UPDATE stores
@@ -182,6 +184,7 @@ export function updateStore(
       )
       .run(nextName, nextPlatform, nextMarket, nextLang, nextStatus, nextNotes, now, storeId);
 
+    rebuildStoreLinkedListingSearchDocuments(db, storeId);
     recordActivity(db, {
       actorUserId,
       action: "store.update",
@@ -199,19 +202,19 @@ export function deleteStore(
   actorUserId: string,
   storeId: string
 ): { deleted: boolean; id: string } {
-  const existing = getStoreById(db, storeId);
-  const refRow = db.raw
-    .prepare("SELECT COUNT(*) AS count FROM listings WHERE store_id = ?")
-    .get(storeId) as { count: number };
-  if (Number(refRow.count) > 0) {
-    throw new AppError(
-      409,
-      "CONFLICT",
-      `店铺 "${existing.name}" 下存在 ${refRow.count} 条上架链接记录，禁止删除；请改为归档状态`
-    );
-  }
-
   db.transaction(() => {
+    const existing = getStoreById(db, storeId);
+    const refRow = db.raw
+      .prepare("SELECT COUNT(*) AS count FROM listings WHERE store_id = ?")
+      .get(storeId) as { count: number };
+    if (Number(refRow.count) > 0) {
+      throw new AppError(
+        409,
+        "CONFLICT",
+        `店铺 "${existing.name}" 下存在 ${refRow.count} 条上架链接记录，禁止删除；请改为归档状态`
+      );
+    }
+
     db.raw.prepare("DELETE FROM stores WHERE id = ?").run(storeId);
     recordActivity(db, {
       actorUserId,
