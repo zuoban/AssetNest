@@ -282,6 +282,143 @@ function mapAssetRow(
   };
 }
 
+interface PreparedStorageFile {
+  fileId: string;
+  deduplicated: boolean;
+  existingWidth: number | null;
+  existingHeight: number | null;
+  thumbResult: { thumbStatus: ThumbStatus; thumbKey: string | null };
+}
+
+async function prepareStorageFileAndThumbnail(
+  db: AppDatabase,
+  config: ResolvedAppConfig,
+  storageProvider: ReturnType<StorageRegistry["require"]>,
+  targetStorageId: string,
+  objectKey: string,
+  staged: StagedUploadFile,
+  detected: ReturnType<typeof detectFileType>
+): Promise<PreparedStorageFile> {
+  // Content-addressed deduplication check (caller holds per-(storageId, objectKey) lock)
+  const existingFile = db.raw
+    .prepare(
+      `SELECT id, object_key, state, width, height
+       FROM files
+       WHERE storage_id = ? AND sha256 = ?`
+    )
+    .get(targetStorageId, staged.sha256) as
+    | { id: string; object_key: string; state: string; width: number | null; height: number | null }
+    | undefined;
+
+  let deduplicated = false;
+  let fileId: string;
+
+  if (
+    existingFile &&
+    existingFile.state === "ready" &&
+    existingFile.object_key === objectKey &&
+    (await storageProvider.exists(existingFile.object_key))
+  ) {
+    deduplicated = true;
+    fileId = existingFile.id;
+  } else {
+    // Stream to storage outside SQLite transaction
+    await storageProvider.put(objectKey, fs.createReadStream(staged.tempPath), {
+      contentType: detected.mimeType,
+      contentLength: staged.sizeBytes,
+      sha256: staged.sha256
+    });
+    fileId = existingFile?.id ?? crypto.randomUUID();
+  }
+
+  // Generate thumbnail outside SQLite transaction
+  const expectedThumbKey = buildThumbnailRelPath(staged.sha256);
+  const expectedThumbAbs = resolveThumbnailAbsPath(config.cache.path, expectedThumbKey);
+  let thumbResult: { thumbStatus: ThumbStatus; thumbKey: string | null };
+  if (detected.isRasterPreviewable && (await isValidThumbnailFile(expectedThumbAbs))) {
+    thumbResult = { thumbStatus: "ready", thumbKey: expectedThumbKey };
+  } else {
+    thumbResult = await generateThumbnailFromFile(
+      staged.tempPath,
+      detected.mimeType,
+      staged.sha256,
+      config.cache.path,
+      config.cache.maxSizeMB
+    );
+  }
+
+  return {
+    fileId,
+    deduplicated,
+    existingWidth: existingFile?.width ?? null,
+    existingHeight: existingFile?.height ?? null,
+    thumbResult
+  };
+}
+
+function upsertReadyFileRecord(
+  db: AppDatabase,
+  params: {
+    prepared: PreparedStorageFile;
+    targetStorageId: string;
+    objectKey: string;
+    staged: StagedUploadFile;
+    detected: ReturnType<typeof detectFileType>;
+    dimensions: { width: number | null; height: number | null };
+    now: string;
+  }
+): string {
+  const { prepared, targetStorageId, objectKey, staged, detected, dimensions, now } = params;
+  if (!prepared.deduplicated) {
+    db.raw
+      .prepare(
+        `INSERT INTO files (
+           id, storage_id, object_key, sha256, size_bytes, mime_type, ext,
+           width, height, duration_ms, state, last_error, created_at, updated_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'ready', NULL, ?, ?)
+         ON CONFLICT(storage_id, sha256) DO UPDATE SET
+           state = 'ready',
+           last_error = NULL,
+           object_key = excluded.object_key,
+           size_bytes = excluded.size_bytes,
+           mime_type = excluded.mime_type,
+           ext = excluded.ext,
+           width = COALESCE(files.width, excluded.width),
+           height = COALESCE(files.height, excluded.height),
+           updated_at = excluded.updated_at`
+      )
+      .run(
+        prepared.fileId,
+        targetStorageId,
+        objectKey,
+        staged.sha256,
+        staged.sizeBytes,
+        detected.mimeType,
+        detected.ext,
+        dimensions.width,
+        dimensions.height,
+        now,
+        now
+      );
+    const resolved = db.raw
+      .prepare("SELECT id FROM files WHERE storage_id = ? AND sha256 = ?")
+      .get(targetStorageId, staged.sha256) as { id: string };
+    return resolved.id;
+  }
+
+  if (
+    (dimensions.width && !prepared.existingWidth) ||
+    (dimensions.height && !prepared.existingHeight)
+  ) {
+    db.raw
+      .prepare(
+        "UPDATE files SET width = COALESCE(width, ?), height = COALESCE(height, ?), updated_at = ? WHERE id = ?"
+      )
+      .run(dimensions.width, dimensions.height, now, prepared.fileId);
+  }
+  return prepared.fileId;
+}
+
 export async function ingestStagedFile(
   db: AppDatabase,
   config: ResolvedAppConfig,
@@ -328,175 +465,123 @@ export async function ingestStagedFile(
   }
 
   const dimensions = await inspectImageDimensions(staged.tempPath, detected.mimeType);
-
-  // Content-addressed deduplication check
-  const existingFile = db.raw
-    .prepare(
-      `SELECT id, object_key, state, width, height
-       FROM files
-       WHERE storage_id = ? AND sha256 = ?`
-    )
-    .get(targetStorageId, staged.sha256) as
-    | { id: string; object_key: string; state: string; width: number | null; height: number | null }
-    | undefined;
-
-  let deduplicated = false;
-  let fileId: string;
-
-  if (existingFile && existingFile.state === "ready" && (await storageProvider.exists(existingFile.object_key))) {
-    deduplicated = true;
-    fileId = existingFile.id;
-  } else {
-    // Stream to storage outside SQLite transaction
-    await storageProvider.put(objectKey, fs.createReadStream(staged.tempPath), {
-      contentType: detected.mimeType,
-      contentLength: staged.sizeBytes,
-      sha256: staged.sha256
-    });
-    fileId = existingFile?.id ?? crypto.randomUUID();
-  }
-
-  // Generate thumbnail outside SQLite transaction
-  const expectedThumbKey = buildThumbnailRelPath(staged.sha256);
-  const expectedThumbAbs = resolveThumbnailAbsPath(config.cache.path, expectedThumbKey);
-  let thumbResult: { thumbStatus: ThumbStatus; thumbKey: string | null };
-  if (detected.isRasterPreviewable && (await isValidThumbnailFile(expectedThumbAbs))) {
-    thumbResult = { thumbStatus: "ready", thumbKey: expectedThumbKey };
-  } else {
-    thumbResult = await generateThumbnailFromFile(
-      staged.tempPath,
-      detected.mimeType,
-      staged.sha256,
-      config.cache.path,
-      config.cache.maxSizeMB
-    );
-  }
-
   const assetId = crypto.randomUUID();
   const versionId = crypto.randomUUID();
-  const now = new Date().toISOString();
   const baseDisplayName = path.parse(safeFilename).name || safeFilename;
 
-  db.transaction(() => {
-    if (!deduplicated) {
-      db.raw
-        .prepare(
-          `INSERT INTO files (
-             id, storage_id, object_key, sha256, size_bytes, mime_type, ext,
-             width, height, duration_ms, state, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'ready', ?, ?)
-           ON CONFLICT(storage_id, sha256) DO UPDATE SET
-             state = 'ready',
-             width = COALESCE(files.width, excluded.width),
-             height = COALESCE(files.height, excluded.height),
-             updated_at = excluded.updated_at`
-        )
-        .run(
-          fileId,
+  const deduplicated = await storageRegistry.withObjectLock(
+    targetStorageId,
+    objectKey,
+    async () => {
+      const prepared = await prepareStorageFileAndThumbnail(
+        db,
+        config,
+        storageProvider,
+        targetStorageId,
+        objectKey,
+        staged,
+        detected
+      );
+      const now = new Date().toISOString();
+
+      db.transaction(() => {
+        const fileId = upsertReadyFileRecord(db, {
+          prepared,
           targetStorageId,
           objectKey,
-          staged.sha256,
-          staged.sizeBytes,
-          detected.mimeType,
-          detected.ext,
-          dimensions.width,
-          dimensions.height,
-          now,
+          staged,
+          detected,
+          dimensions,
           now
-        );
-      const resolved = db.raw
-        .prepare("SELECT id FROM files WHERE storage_id = ? AND sha256 = ?")
-        .get(targetStorageId, staged.sha256) as { id: string };
-      fileId = resolved.id;
-    } else if ((dimensions.width && !existingFile?.width) || (dimensions.height && !existingFile?.height)) {
-      db.raw
-        .prepare("UPDATE files SET width = COALESCE(width, ?), height = COALESCE(height, ?), updated_at = ? WHERE id = ?")
-        .run(dimensions.width, dimensions.height, now, fileId);
-    }
+        });
 
-    db.raw
-      .prepare(
-        `INSERT INTO assets (
-           id, name, original_filename, asset_type, purpose, folder_id,
-           current_version_id, is_favorite, source, source_url, notes,
-           created_at, updated_at
-         ) VALUES (?, ?, ?, ?, ?, ?, NULL, 0, ?, ?, ?, ?, ?)`
-      )
-      .run(
-        assetId,
-        baseDisplayName,
-        safeFilename,
-        detected.assetType,
-        options.purpose || "other",
-        options.folderId,
-        options.source || "",
-        options.sourceUrl,
-        options.notes || "",
-        now,
-        now
-      );
+        db.raw
+          .prepare(
+            `INSERT INTO assets (
+               id, name, original_filename, asset_type, purpose, folder_id,
+               current_version_id, is_favorite, source, source_url, notes,
+               created_at, updated_at
+             ) VALUES (?, ?, ?, ?, ?, ?, NULL, 0, ?, ?, ?, ?, ?)`
+          )
+          .run(
+            assetId,
+            baseDisplayName,
+            safeFilename,
+            detected.assetType,
+            options.purpose || "other",
+            options.folderId,
+            options.source || "",
+            options.sourceUrl,
+            options.notes || "",
+            now,
+            now
+          );
 
-    db.raw
-      .prepare(
-        `INSERT INTO asset_versions (
-           id, asset_id, file_id, version_no, original_filename,
-           change_note, prompt_text,
-           thumb_status, thumb_key, metadata_json, created_at
-         ) VALUES (?, ?, ?, 1, ?, '', ?, ?, ?, '{}', ?)`
-      )
-      .run(
-        versionId,
-        assetId,
-        fileId,
-        safeFilename,
-        options.promptText || "",
-        thumbResult.thumbStatus,
-        thumbResult.thumbKey,
-        now
-      );
+        db.raw
+          .prepare(
+            `INSERT INTO asset_versions (
+               id, asset_id, file_id, version_no, original_filename,
+               change_note, prompt_text,
+               thumb_status, thumb_key, metadata_json, created_at
+             ) VALUES (?, ?, ?, 1, ?, '', ?, ?, ?, '{}', ?)`
+          )
+          .run(
+            versionId,
+            assetId,
+            fileId,
+            safeFilename,
+            options.promptText || "",
+            prepared.thumbResult.thumbStatus,
+            prepared.thumbResult.thumbKey,
+            now
+          );
 
-    db.raw
-      .prepare("UPDATE assets SET current_version_id = ? WHERE id = ?")
-      .run(versionId, assetId);
+        db.raw
+          .prepare("UPDATE assets SET current_version_id = ? WHERE id = ?")
+          .run(versionId, assetId);
 
-    if (options.productIds.length > 0) {
-      const insertLink = db.raw.prepare(
-        "INSERT OR IGNORE INTO product_assets (product_id, asset_id, created_at) VALUES (?, ?, ?)"
-      );
-      const setCoverIfEmpty = db.raw.prepare(
-        "UPDATE products SET cover_version_id = ?, updated_at = ? WHERE id = ? AND cover_version_id IS NULL"
-      );
-      for (const productId of options.productIds) {
-        insertLink.run(productId, assetId, now);
-        if (detected.isRasterPreviewable) {
-          setCoverIfEmpty.run(versionId, now, productId);
+        if (options.productIds.length > 0) {
+          const insertLink = db.raw.prepare(
+            "INSERT OR IGNORE INTO product_assets (product_id, asset_id, created_at) VALUES (?, ?, ?)"
+          );
+          const setCoverIfEmpty = db.raw.prepare(
+            "UPDATE products SET cover_version_id = ?, updated_at = ? WHERE id = ? AND cover_version_id IS NULL"
+          );
+          for (const productId of options.productIds) {
+            insertLink.run(productId, assetId, now);
+            if (detected.isRasterPreviewable) {
+              setCoverIfEmpty.run(versionId, now, productId);
+            }
+          }
         }
-      }
-    }
 
-    if (options.tagIds.length > 0) {
-      const insertTag = db.raw.prepare(
-        "INSERT OR IGNORE INTO asset_tags (asset_id, tag_id, created_at) VALUES (?, ?, ?)"
-      );
-      for (const tagId of options.tagIds) {
-        insertTag.run(assetId, tagId, now);
-      }
-    }
+        if (options.tagIds.length > 0) {
+          const insertTag = db.raw.prepare(
+            "INSERT OR IGNORE INTO asset_tags (asset_id, tag_id, created_at) VALUES (?, ?, ?)"
+          );
+          for (const tagId of options.tagIds) {
+            insertTag.run(assetId, tagId, now);
+          }
+        }
 
-    rebuildAssetSearchDocument(db, assetId);
-    recordActivity(db, {
-      actorUserId,
-      action: "asset.upload",
-      objectType: "asset",
-      objectId: assetId,
-      details: {
-        filename: safeFilename,
-        storageId: targetStorageId,
-        sizeBytes: staged.sizeBytes,
-        deduplicated
-      }
-    });
-  });
+        rebuildAssetSearchDocument(db, assetId);
+        recordActivity(db, {
+          actorUserId,
+          action: "asset.upload",
+          objectType: "asset",
+          objectId: assetId,
+          details: {
+            filename: safeFilename,
+            storageId: targetStorageId,
+            sizeBytes: staged.sizeBytes,
+            deduplicated: prepared.deduplicated
+          }
+        });
+      });
+
+      return prepared.deduplicated;
+    }
+  );
 
   return {
     asset: getAssetDetail(db, assetId),
@@ -1250,148 +1335,98 @@ export async function appendAssetVersion(
   const objectKey = buildOriginalObjectKey(staged.sha256);
   const dimensions = await inspectImageDimensions(staged.tempPath, detected.mimeType);
 
-  const existingFile = db.raw
-    .prepare(
-      `SELECT id, object_key, state, width, height
-       FROM files
-       WHERE storage_id = ? AND sha256 = ?`
-    )
-    .get(targetStorageId, staged.sha256) as
-    | {
-        id: string;
-        object_key: string;
-        state: string;
-        width: number | null;
-        height: number | null;
-      }
-    | undefined;
-
-  let deduplicated = false;
-  let fileId: string;
-
-  if (existingFile && existingFile.state === "ready" && (await storageProvider.exists(existingFile.object_key))) {
-    deduplicated = true;
-    fileId = existingFile.id;
-  } else {
-    await storageProvider.put(objectKey, fs.createReadStream(staged.tempPath), {
-      contentType: detected.mimeType,
-      contentLength: staged.sizeBytes,
-      sha256: staged.sha256
-    });
-    fileId = existingFile?.id ?? crypto.randomUUID();
-  }
-
-  const expectedThumbKey = buildThumbnailRelPath(staged.sha256);
-  const expectedThumbAbs = resolveThumbnailAbsPath(config.cache.path, expectedThumbKey);
-  let thumbResult: { thumbStatus: ThumbStatus; thumbKey: string | null };
-  if (detected.isRasterPreviewable && (await isValidThumbnailFile(expectedThumbAbs))) {
-    thumbResult = { thumbStatus: "ready", thumbKey: expectedThumbKey };
-  } else {
-    thumbResult = await generateThumbnailFromFile(
-      staged.tempPath,
-      detected.mimeType,
-      staged.sha256,
-      config.cache.path,
-      config.cache.maxSizeMB
-    );
-  }
-
   const versionId = crypto.randomUUID();
-  const now = new Date().toISOString();
   const setAsCurrent = options.setAsCurrent !== false;
-  let versionNo = 1;
 
-  db.transaction(() => {
-    if (!deduplicated) {
-      db.raw
-        .prepare(
-          `INSERT INTO files (
-             id, storage_id, object_key, sha256, size_bytes, mime_type, ext,
-             width, height, duration_ms, state, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, 'ready', ?, ?)
-           ON CONFLICT(storage_id, sha256) DO UPDATE SET
-             state = 'ready',
-             width = COALESCE(files.width, excluded.width),
-             height = COALESCE(files.height, excluded.height),
-             updated_at = excluded.updated_at`
-        )
-        .run(
-          fileId,
+  const deduplicated = await storageRegistry.withObjectLock(
+    targetStorageId,
+    objectKey,
+    async () => {
+      const prepared = await prepareStorageFileAndThumbnail(
+        db,
+        config,
+        storageProvider,
+        targetStorageId,
+        objectKey,
+        staged,
+        detected
+      );
+      const now = new Date().toISOString();
+
+      db.transaction(() => {
+        const liveAsset = db.raw
+          .prepare("SELECT id FROM assets WHERE id = ? AND deleted_at IS NULL")
+          .get(assetId) as { id: string } | undefined;
+        if (!liveAsset) {
+          throw new AppError(404, "NOT_FOUND", "素材不存在或已移入回收站");
+        }
+
+        const fileId = upsertReadyFileRecord(db, {
+          prepared,
           targetStorageId,
           objectKey,
-          staged.sha256,
-          staged.sizeBytes,
-          detected.mimeType,
-          detected.ext,
-          dimensions.width,
-          dimensions.height,
-          now,
+          staged,
+          detected,
+          dimensions,
           now
-        );
-      const resolved = db.raw
-        .prepare("SELECT id FROM files WHERE storage_id = ? AND sha256 = ?")
-        .get(targetStorageId, staged.sha256) as { id: string };
-      fileId = resolved.id;
-    } else if ((dimensions.width && !existingFile?.width) || (dimensions.height && !existingFile?.height)) {
-      db.raw
-        .prepare(
-          "UPDATE files SET width = COALESCE(width, ?), height = COALESCE(height, ?), updated_at = ? WHERE id = ?"
-        )
-        .run(dimensions.width, dimensions.height, now, fileId);
+        });
+
+        const maxRow = db.raw
+          .prepare("SELECT COALESCE(MAX(version_no), 0) AS max_no FROM asset_versions WHERE asset_id = ?")
+          .get(assetId) as { max_no: number };
+        const versionNo = Number(maxRow.max_no) + 1;
+
+        db.raw
+          .prepare(
+            `INSERT INTO asset_versions (
+               id, asset_id, file_id, version_no, original_filename,
+               change_note, prompt_text, reference_asset_version_id,
+               thumb_status, thumb_key, metadata_json, created_at
+             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?)`
+          )
+          .run(
+            versionId,
+            assetId,
+            fileId,
+            versionNo,
+            safeFilename,
+            options.changeNote.trim(),
+            options.promptText.trim(),
+            options.referenceAssetVersionId,
+            prepared.thumbResult.thumbStatus,
+            prepared.thumbResult.thumbKey,
+            now
+          );
+
+        if (setAsCurrent) {
+          db.raw
+            .prepare("UPDATE assets SET current_version_id = ?, original_filename = ?, updated_at = ? WHERE id = ?")
+            .run(versionId, safeFilename, now, assetId);
+        } else {
+          db.raw
+            .prepare("UPDATE assets SET updated_at = ? WHERE id = ?")
+            .run(now, assetId);
+        }
+
+        rebuildAssetSearchDocument(db, assetId);
+        recordActivity(db, {
+          actorUserId,
+          action: "asset.version.append",
+          objectType: "asset_version",
+          objectId: versionId,
+          details: {
+            assetId,
+            versionNo,
+            storageId: targetStorageId,
+            deduplicated: prepared.deduplicated,
+            setAsCurrent
+          }
+        });
+      });
+
+      return prepared.deduplicated;
     }
-
-    const maxRow = db.raw
-      .prepare("SELECT COALESCE(MAX(version_no), 0) AS max_no FROM asset_versions WHERE asset_id = ?")
-      .get(assetId) as { max_no: number };
-    versionNo = Number(maxRow.max_no) + 1;
-
-    db.raw
-      .prepare(
-        `INSERT INTO asset_versions (
-           id, asset_id, file_id, version_no, original_filename,
-           change_note, prompt_text, reference_asset_version_id,
-           thumb_status, thumb_key, metadata_json, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?)`
-      )
-      .run(
-        versionId,
-        assetId,
-        fileId,
-        versionNo,
-        safeFilename,
-        options.changeNote.trim(),
-        options.promptText.trim(),
-        options.referenceAssetVersionId,
-        thumbResult.thumbStatus,
-        thumbResult.thumbKey,
-        now
-      );
-
-    if (setAsCurrent) {
-      db.raw
-        .prepare("UPDATE assets SET current_version_id = ?, original_filename = ?, updated_at = ? WHERE id = ?")
-        .run(versionId, safeFilename, now, assetId);
-    } else {
-      db.raw
-        .prepare("UPDATE assets SET updated_at = ? WHERE id = ?")
-        .run(now, assetId);
-    }
-
-    rebuildAssetSearchDocument(db, assetId);
-    recordActivity(db, {
-      actorUserId,
-      action: "asset.version.append",
-      objectType: "asset_version",
-      objectId: versionId,
-      details: {
-        assetId,
-        versionNo,
-        storageId: targetStorageId,
-        deduplicated,
-        setAsCurrent
-      }
-    });
-  });
+  );
 
   const detail = getAssetDetail(db, assetId);
   const createdVersion = detail.versions.find((ver) => ver.id === versionId)!;

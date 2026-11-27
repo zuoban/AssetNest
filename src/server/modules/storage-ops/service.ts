@@ -17,7 +17,7 @@ import type {
 import type { ResolvedAppConfig } from "../../config/schema.js";
 import type { AppDatabase } from "../../db/database.js";
 import { AppError } from "../../http/errors.js";
-import type { StorageRegistry } from "../../storage/registry.js";
+import { buildStorageObjectJobLockKey, type StorageRegistry } from "../../storage/registry.js";
 import type { StorageProvider } from "../../storage/types.js";
 import { enqueueJob } from "../jobs/service.js";
 import { NonRetryableJobError, type JobContext, type JobWorker } from "../jobs/worker.js";
@@ -650,16 +650,17 @@ export async function executeStorageMigrationJob(
   for (const item of pendingItems) {
     ctx.throwIfCancelled();
 
-    const lockKey = `file:${item.file_id}`;
-    if (!ctx.acquireLock(lockKey)) {
+    const fileLockKey = `file:${item.file_id}`;
+    if (!ctx.acquireLock(fileLockKey)) {
       failedCount += 1;
       lastFailureMessage = `文件 ${item.file_id} 正被其他后台任务锁定`;
       continue;
     }
 
+    const acquiredLocks: string[] = [fileLockKey];
     const stageFilePath = path.join(config.uploads.tempDir, `migrate-${ctx.jobId}-${crypto.randomUUID()}.part`);
     try {
-      const fileRow = db.raw
+      const initialFileRow = db.raw
         .prepare(
           `SELECT id, storage_id, object_key, sha256, size_bytes, mime_type, state
            FROM files
@@ -677,7 +678,7 @@ export async function executeStorageMigrationJob(
           }
         | undefined;
 
-      if (!fileRow || fileRow.state !== "ready" || fileRow.storage_id !== sourceStorageId) {
+      if (!initialFileRow || initialFileRow.state !== "ready" || initialFileRow.storage_id !== sourceStorageId) {
         const now = new Date().toISOString();
         db.raw
           .prepare(
@@ -692,139 +693,201 @@ export async function executeStorageMigrationJob(
         continue;
       }
 
-      const expectedSize = Number(fileRow.size_bytes);
-      const targetAlreadyValid =
-        (await targetProvider.exists(fileRow.object_key)) &&
-        (await verifyProviderObjectHash(
-          targetProvider,
-          fileRow.object_key,
-          fileRow.sha256,
-          expectedSize,
-          ctx.signal
-        ));
-
-      if (!targetAlreadyValid) {
-        ctx.throwIfCancelled();
-        const sourceRes = await sourceProvider.get(fileRow.object_key, { signal: ctx.signal });
-        const sourceHash = crypto.createHash("sha256");
-        let sourceBytes = 0;
-
-        const writer = fs.createWriteStream(stageFilePath);
-        sourceRes.stream.on("data", (chunk: Buffer) => {
-          sourceBytes += chunk.length;
-          sourceHash.update(chunk);
-        });
-        await pipeline(sourceRes.stream, writer);
-
-        const actualSourceSha = sourceHash.digest("hex");
-        if (sourceBytes !== expectedSize || actualSourceSha !== fileRow.sha256) {
-          throw new Error(
-            `来源文件完整性校验失败（file=${fileRow.id}, expected=${fileRow.sha256}, actual=${actualSourceSha}）`
-          );
+      const objectLockKeys = Array.from(
+        new Set([
+          buildStorageObjectJobLockKey(sourceStorageId, initialFileRow.object_key),
+          buildStorageObjectJobLockKey(targetStorageId, initialFileRow.object_key)
+        ])
+      ).sort();
+      for (const key of objectLockKeys) {
+        if (!ctx.acquireLock(key)) {
+          throw new Error(`对象 ${initialFileRow.object_key} 正被其他后台任务锁定`);
         }
-
-        ctx.throwIfCancelled();
-        await targetProvider.put(fileRow.object_key, fs.createReadStream(stageFilePath), {
-          contentType: fileRow.mime_type,
-          contentLength: expectedSize,
-          sha256: fileRow.sha256,
-          signal: ctx.signal
-        });
-
-        const verifiedAfterPut = await verifyProviderObjectHash(
-          targetProvider,
-          fileRow.object_key,
-          fileRow.sha256,
-          expectedSize,
-          ctx.signal
-        );
-        if (!verifiedAfterPut) {
-          throw new Error(`目标存储读回校验失败（file=${fileRow.id}, key=${fileRow.object_key}）`);
-        }
+        acquiredLocks.push(key);
       }
 
-      const copiedAt = new Date().toISOString();
-      db.raw
-        .prepare(
-          `UPDATE storage_migration_items
-           SET status = 'copied', last_error = NULL, updated_at = ?
-           WHERE id = ?`
-        )
-        .run(copiedAt, item.id);
+      await storageRegistry.withObjectLocks(
+        [
+          { storageId: sourceStorageId, objectKey: initialFileRow.object_key },
+          { storageId: targetStorageId, objectKey: initialFileRow.object_key }
+        ],
+        async () => {
+          ctx.throwIfCancelled();
 
-      // Short SQLite transaction to atomically switch or merge metadata
-      const switchKind = db.transaction((): "switched" | "merged" => {
-        const now = new Date().toISOString();
-        const targetConflict = db.raw
-          .prepare(
-            `SELECT id, state
-             FROM files
-             WHERE storage_id = ? AND sha256 = ? AND id != ?`
-          )
-          .get(targetStorageId, fileRow.sha256, fileRow.id) as
-          | { id: string; state: string }
-          | undefined;
+          const fileRow = db.raw
+            .prepare(
+              `SELECT id, storage_id, object_key, sha256, size_bytes, mime_type, state
+               FROM files
+               WHERE id = ?`
+            )
+            .get(item.file_id) as
+            | {
+                id: string;
+                storage_id: string;
+                object_key: string;
+                sha256: string;
+                size_bytes: number;
+                mime_type: string;
+                state: string;
+              }
+            | undefined;
 
-        if (targetConflict) {
-          if (targetConflict.state !== "ready") {
+          if (
+            !fileRow ||
+            fileRow.state !== "ready" ||
+            fileRow.storage_id !== sourceStorageId ||
+            fileRow.object_key !== initialFileRow.object_key
+          ) {
+            const now = new Date().toISOString();
             db.raw
-              .prepare("UPDATE files SET state = 'ready', last_error = NULL, updated_at = ? WHERE id = ?")
-              .run(now, targetConflict.id);
+              .prepare(
+                `UPDATE storage_migration_items
+                 SET status = 'skipped', last_error = NULL, updated_at = ?
+                 WHERE id = ?`
+              )
+              .run(now, item.id);
+            skippedCount += 1;
+            completedCount += 1;
+            ctx.updateProgress({ stage: "migrating_files", current: completedCount, total });
+            return;
           }
-          db.raw
-            .prepare("UPDATE asset_versions SET file_id = ? WHERE file_id = ?")
-            .run(targetConflict.id, fileRow.id);
-          db.raw
-            .prepare("UPDATE files SET state = 'pending_delete', updated_at = ? WHERE id = ?")
-            .run(now, fileRow.id);
+
+          const expectedSize = Number(fileRow.size_bytes);
+          const targetAlreadyValid =
+            (await targetProvider.exists(fileRow.object_key)) &&
+            (await verifyProviderObjectHash(
+              targetProvider,
+              fileRow.object_key,
+              fileRow.sha256,
+              expectedSize,
+              ctx.signal
+            ));
+
+          if (!targetAlreadyValid) {
+            ctx.throwIfCancelled();
+            const sourceRes = await sourceProvider.get(fileRow.object_key, { signal: ctx.signal });
+            const sourceHash = crypto.createHash("sha256");
+            let sourceBytes = 0;
+
+            const writer = fs.createWriteStream(stageFilePath);
+            sourceRes.stream.on("data", (chunk: Buffer) => {
+              sourceBytes += chunk.length;
+              sourceHash.update(chunk);
+            });
+            await pipeline(sourceRes.stream, writer);
+
+            const actualSourceSha = sourceHash.digest("hex");
+            if (sourceBytes !== expectedSize || actualSourceSha !== fileRow.sha256) {
+              throw new Error(
+                `来源文件完整性校验失败（file=${fileRow.id}, expected=${fileRow.sha256}, actual=${actualSourceSha}）`
+              );
+            }
+
+            ctx.throwIfCancelled();
+            await targetProvider.put(fileRow.object_key, fs.createReadStream(stageFilePath), {
+              contentType: fileRow.mime_type,
+              contentLength: expectedSize,
+              sha256: fileRow.sha256,
+              signal: ctx.signal
+            });
+
+            const verifiedAfterPut = await verifyProviderObjectHash(
+              targetProvider,
+              fileRow.object_key,
+              fileRow.sha256,
+              expectedSize,
+              ctx.signal
+            );
+            if (!verifiedAfterPut) {
+              throw new Error(`目标存储读回校验失败（file=${fileRow.id}, key=${fileRow.object_key}）`);
+            }
+          }
+
+          const copiedAt = new Date().toISOString();
           db.raw
             .prepare(
               `UPDATE storage_migration_items
-               SET status = 'merged', merged_into_file_id = ?, last_error = NULL, updated_at = ?
+               SET status = 'copied', last_error = NULL, updated_at = ?
                WHERE id = ?`
             )
-            .run(targetConflict.id, now, item.id);
-        } else {
-          db.raw
-            .prepare("UPDATE files SET storage_id = ?, updated_at = ? WHERE id = ?")
-            .run(targetStorageId, now, fileRow.id);
-          db.raw
-            .prepare(
-              `UPDATE storage_migration_items
-               SET status = 'switched', last_error = NULL, updated_at = ?
-               WHERE id = ?`
-            )
-            .run(now, item.id);
-        }
+            .run(copiedAt, item.id);
 
-        db.raw
-          .prepare(
-            `INSERT OR IGNORE INTO storage_cleanup_queue (
-               id, storage_id, object_key, sha256, size_bytes,
-               reason, source_job_id, status, last_error, created_at, updated_at
-             ) VALUES (?, ?, ?, ?, ?, 'migration_source', ?, 'awaiting_confirmation', NULL, ?, ?)`
-          )
-          .run(
-            crypto.randomUUID(),
-            sourceStorageId,
-            fileRow.object_key,
-            fileRow.sha256,
-            expectedSize,
-            ctx.jobId,
-            now,
-            now
-          );
+          // Short SQLite transaction to atomically switch or merge metadata
+          const switchKind = db.transaction((): "switched" | "merged" => {
+            const now = new Date().toISOString();
+            const targetConflict = db.raw
+              .prepare(
+                `SELECT id, state
+                 FROM files
+                 WHERE storage_id = ? AND sha256 = ? AND id != ?`
+              )
+              .get(targetStorageId, fileRow.sha256, fileRow.id) as
+              | { id: string; state: string }
+              | undefined;
 
-        return targetConflict ? "merged" : "switched";
-      });
+            if (targetConflict) {
+              if (targetConflict.state !== "ready") {
+                db.raw
+                  .prepare("UPDATE files SET state = 'ready', last_error = NULL, updated_at = ? WHERE id = ?")
+                  .run(now, targetConflict.id);
+              }
+              db.raw
+                .prepare("UPDATE asset_versions SET file_id = ? WHERE file_id = ?")
+                .run(targetConflict.id, fileRow.id);
+              db.raw
+                .prepare("UPDATE files SET state = 'pending_delete', updated_at = ? WHERE id = ?")
+                .run(now, fileRow.id);
+              db.raw
+                .prepare(
+                  `UPDATE storage_migration_items
+                   SET status = 'merged', merged_into_file_id = ?, last_error = NULL, updated_at = ?
+                   WHERE id = ?`
+                )
+                .run(targetConflict.id, now, item.id);
+            } else {
+              db.raw
+                .prepare("UPDATE files SET storage_id = ?, updated_at = ? WHERE id = ?")
+                .run(targetStorageId, now, fileRow.id);
+              db.raw
+                .prepare(
+                  `UPDATE storage_migration_items
+                   SET status = 'switched', last_error = NULL, updated_at = ?
+                   WHERE id = ?`
+                )
+                .run(now, item.id);
+            }
 
-      if (switchKind === "merged") {
-        mergedCount += 1;
-      } else {
-        switchedCount += 1;
-      }
-      completedCount += 1;
-      ctx.updateProgress({ stage: "migrating_files", current: completedCount, total });
+            db.raw
+              .prepare(
+                `INSERT OR IGNORE INTO storage_cleanup_queue (
+                   id, storage_id, object_key, sha256, size_bytes,
+                   reason, source_job_id, status, last_error, created_at, updated_at
+                 ) VALUES (?, ?, ?, ?, ?, 'migration_source', ?, 'awaiting_confirmation', NULL, ?, ?)`
+              )
+              .run(
+                crypto.randomUUID(),
+                sourceStorageId,
+                fileRow.object_key,
+                fileRow.sha256,
+                expectedSize,
+                ctx.jobId,
+                now,
+                now
+              );
+
+            return targetConflict ? "merged" : "switched";
+          });
+
+          if (switchKind === "merged") {
+            mergedCount += 1;
+          } else {
+            switchedCount += 1;
+          }
+          completedCount += 1;
+          ctx.updateProgress({ stage: "migrating_files", current: completedCount, total });
+        },
+        { signal: ctx.signal }
+      );
     } catch (err) {
       if (err instanceof Error && err.name === "JobCancelledError") {
         throw err;
@@ -845,7 +908,9 @@ export async function executeStorageMigrationJob(
       lastFailureMessage = message;
     } finally {
       await fsp.rm(stageFilePath, { force: true }).catch(() => {});
-      ctx.releaseLock(lockKey);
+      while (acquiredLocks.length > 0) {
+        ctx.releaseLock(acquiredLocks.pop()!);
+      }
     }
   }
 
@@ -1061,7 +1126,7 @@ export async function executeStorageCleanupJob(
     const item = items[index]!;
     ctx.throwIfCancelled();
 
-    const lockKey = `cleanup:${item.storage_id}:${item.object_key}`;
+    const lockKey = buildStorageObjectJobLockKey(item.storage_id, item.object_key);
     if (!ctx.acquireLock(lockKey)) {
       failedCount += 1;
       lastFailureMessage = `清理对象 ${item.object_key} 正被其他任务锁定`;
@@ -1069,77 +1134,109 @@ export async function executeStorageCleanupJob(
     }
 
     try {
-      // Reference protection: never delete an object that still has a live file or asset_version reference on the same storage
-      const liveRef = db.raw
-        .prepare(
-          `SELECT COUNT(*) AS count
-           FROM files f
-           WHERE f.storage_id = ? AND f.object_key = ?
-             AND (
-               f.state = 'ready'
-               OR EXISTS (SELECT 1 FROM asset_versions av WHERE av.file_id = f.id)
-             )`
-        )
-        .get(item.storage_id, item.object_key) as { count: number };
+      await storageRegistry.withObjectLock(
+        item.storage_id,
+        item.object_key,
+        async () => {
+          ctx.throwIfCancelled();
+          try {
+            const currentQueueRow = db.raw
+              .prepare("SELECT status FROM storage_cleanup_queue WHERE id = ?")
+              .get(item.id) as { status: string } | undefined;
+            if (!currentQueueRow || !["queued", "failed"].includes(currentQueueRow.status)) {
+              return;
+            }
 
-      const now = new Date().toISOString();
-      if (Number(liveRef.count) > 0) {
-        db.raw
-          .prepare(
-            `UPDATE storage_cleanup_queue
-             SET status = 'deleted',
-                 last_error = '目标对象仍被活跃记录引用，已跳过物理删除保护',
-                 updated_at = ?
-             WHERE id = ?`
-          )
-          .run(now, item.id);
-        skippedProtectedCount += 1;
-      } else {
-        const provider = storageRegistry.get(item.storage_id);
-        if (!provider) {
-          throw new Error(`存储空间 "${item.storage_id}" 当前不可用或离线，无法删除物理对象`);
-        }
-        await provider.delete(item.object_key);
+            // Reference protection: never delete an object that still has a live file or asset_version reference on the same storage
+            const liveRef = db.raw
+              .prepare(
+                `SELECT COUNT(*) AS count
+                 FROM files f
+                 WHERE f.storage_id = ? AND f.object_key = ?
+                   AND (
+                     f.state IN ('staging', 'ready')
+                     OR EXISTS (SELECT 1 FROM asset_versions av WHERE av.file_id = f.id)
+                   )`
+              )
+              .get(item.storage_id, item.object_key) as { count: number };
 
-        db.transaction(() => {
-          db.raw
-            .prepare(
-              `UPDATE storage_cleanup_queue
-               SET status = 'deleted', last_error = NULL, updated_at = ?
-               WHERE id = ?`
-            )
-            .run(now, item.id);
-          db.raw
-            .prepare(
-              `UPDATE files
-               SET state = 'deleted', last_error = NULL, updated_at = ?
-               WHERE storage_id = ? AND object_key = ? AND state IN ('pending_delete', 'delete_failed')`
-            )
-            .run(now, item.storage_id, item.object_key);
-        });
-        deletedCount += 1;
-      }
+            if (Number(liveRef.count) > 0) {
+              const now = new Date().toISOString();
+              db.raw
+                .prepare(
+                  `UPDATE storage_cleanup_queue
+                   SET status = 'deleted',
+                       last_error = '目标对象仍被活跃记录引用，已跳过物理删除保护',
+                       updated_at = ?
+                   WHERE id = ?`
+                )
+                .run(now, item.id);
+              skippedProtectedCount += 1;
+            } else {
+              const provider = storageRegistry.get(item.storage_id);
+              if (!provider) {
+                throw new Error(`存储空间 "${item.storage_id}" 当前不可用或离线，无法删除物理对象`);
+              }
+              await provider.delete(item.object_key);
+
+              const now = new Date().toISOString();
+              db.transaction(() => {
+                db.raw
+                  .prepare(
+                    `UPDATE storage_cleanup_queue
+                     SET status = 'deleted', last_error = NULL, updated_at = ?
+                     WHERE id = ?`
+                  )
+                  .run(now, item.id);
+                db.raw
+                  .prepare(
+                    `UPDATE files
+                     SET state = 'deleted', last_error = NULL, updated_at = ?
+                     WHERE storage_id = ? AND object_key = ? AND state IN ('pending_delete', 'delete_failed')`
+                  )
+                  .run(now, item.storage_id, item.object_key);
+              });
+              deletedCount += 1;
+            }
+          } catch (err) {
+            if (err instanceof Error && err.name === "JobCancelledError") {
+              throw err;
+            }
+            if (ctx.isCancelled()) {
+              ctx.throwIfCancelled();
+            }
+            const message = err instanceof Error ? err.message : String(err);
+            const now = new Date().toISOString();
+            db.transaction(() => {
+              db.raw
+                .prepare(
+                  `UPDATE storage_cleanup_queue
+                   SET status = 'failed', last_error = ?, updated_at = ?
+                   WHERE id = ?`
+                )
+                .run(message, now, item.id);
+              db.raw
+                .prepare(
+                  `UPDATE files
+                   SET state = 'delete_failed', last_error = ?, updated_at = ?
+                   WHERE storage_id = ? AND object_key = ? AND state IN ('pending_delete', 'delete_failed')`
+                )
+                .run(message, now, item.storage_id, item.object_key);
+            });
+            failedCount += 1;
+            lastFailureMessage = message;
+          }
+        },
+        { signal: ctx.signal }
+      );
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      const now = new Date().toISOString();
-      db.transaction(() => {
-        db.raw
-          .prepare(
-            `UPDATE storage_cleanup_queue
-             SET status = 'failed', last_error = ?, updated_at = ?
-             WHERE id = ?`
-          )
-          .run(message, now, item.id);
-        db.raw
-          .prepare(
-            `UPDATE files
-             SET state = 'delete_failed', last_error = ?, updated_at = ?
-             WHERE storage_id = ? AND object_key = ? AND state IN ('pending_delete', 'delete_failed')`
-          )
-          .run(message, now, item.storage_id, item.object_key);
-      });
-      failedCount += 1;
-      lastFailureMessage = message;
+      if (err instanceof Error && err.name === "JobCancelledError") {
+        throw err;
+      }
+      if (ctx.isCancelled()) {
+        ctx.throwIfCancelled();
+      }
+      throw err;
     } finally {
       ctx.releaseLock(lockKey);
       ctx.updateProgress({ stage: "cleaning_objects", current: index + 1, total });

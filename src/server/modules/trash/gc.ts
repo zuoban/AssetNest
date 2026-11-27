@@ -3,7 +3,7 @@ import fsp from "node:fs/promises";
 import type { JobRecord } from "../../../shared/types.js";
 import type { ResolvedAppConfig } from "../../config/schema.js";
 import type { AppDatabase } from "../../db/database.js";
-import type { StorageRegistry } from "../../storage/registry.js";
+import { buildStorageObjectJobLockKey, type StorageRegistry } from "../../storage/registry.js";
 import { enqueueJob } from "../jobs/service.js";
 import type { JobContext, JobWorker } from "../jobs/worker.js";
 import { buildThumbnailRelPath, resolveThumbnailAbsPath } from "../media/thumbnail.js";
@@ -221,111 +221,177 @@ export async function executeGcJob(
     const file = orphanFiles[index]!;
     ctx.throwIfCancelled();
 
-    const lockKey = `file:${file.id}`;
-    if (!ctx.acquireLock(lockKey)) {
+    const fileLockKey = `file:${file.id}`;
+    const objectLockKey = buildStorageObjectJobLockKey(file.storage_id, file.object_key);
+    if (!ctx.acquireLock(fileLockKey)) {
+      continue;
+    }
+    if (!ctx.acquireLock(objectLockKey)) {
+      ctx.releaseLock(fileLockKey);
       continue;
     }
 
     try {
-      const stillUnreferenced = db.transaction(() => {
-        const ref = db.raw
-          .prepare("SELECT 1 AS ok FROM asset_versions WHERE file_id = ? LIMIT 1")
-          .get(file.id) as { ok: number } | undefined;
-        if (ref) {
-          return false;
-        }
-        const now = new Date().toISOString();
-        db.raw
-          .prepare("UPDATE files SET state = 'pending_delete', updated_at = ? WHERE id = ?")
-          .run(now, file.id);
-        return true;
-      });
+      await storageRegistry.withObjectLock(
+        file.storage_id,
+        file.object_key,
+        async () => {
+          ctx.throwIfCancelled();
 
-      if (!stillUnreferenced) {
-        continue;
-      }
+          const stillUnreferenced = db.transaction(() => {
+            const currentFile = db.raw
+              .prepare(
+                `SELECT id, storage_id, object_key, state
+                 FROM files
+                 WHERE id = ?`
+              )
+              .get(file.id) as
+              | { id: string; storage_id: string; object_key: string; state: string }
+              | undefined;
+            if (
+              !currentFile ||
+              currentFile.storage_id !== file.storage_id ||
+              currentFile.object_key !== file.object_key ||
+              !["ready", "pending_delete", "delete_failed"].includes(currentFile.state)
+            ) {
+              return false;
+            }
 
-      const provider = storageRegistry.get(file.storage_id);
-      if (!provider) {
-        throw new Error(`存储空间 "${file.storage_id}" 当前不可用或离线，物理对象将保留待重试`);
-      }
+            const ref = db.raw
+              .prepare("SELECT 1 AS ok FROM asset_versions WHERE file_id = ? LIMIT 1")
+              .get(file.id) as { ok: number } | undefined;
+            if (ref) {
+              return false;
+            }
 
-      await provider.delete(file.object_key);
+            const otherLiveObjectRef = db.raw
+              .prepare(
+                `SELECT 1 AS ok
+                 FROM files f
+                 WHERE f.storage_id = ? AND f.object_key = ? AND f.id != ?
+                   AND (
+                     f.state IN ('staging', 'ready')
+                     OR EXISTS (SELECT 1 FROM asset_versions av WHERE av.file_id = f.id)
+                   )
+                 LIMIT 1`
+              )
+              .get(file.storage_id, file.object_key, file.id) as { ok: number } | undefined;
+            if (otherLiveObjectRef) {
+              return false;
+            }
 
-      const now = new Date().toISOString();
-      db.transaction(() => {
-        db.raw
-          .prepare(
-            "UPDATE files SET state = 'deleted', last_error = NULL, updated_at = ? WHERE id = ?"
-          )
-          .run(now, file.id);
-        db.raw
-          .prepare(
-            `UPDATE storage_cleanup_queue
-             SET status = 'deleted', last_error = NULL, updated_at = ?
-             WHERE storage_id = ? AND object_key = ? AND status IN ('awaiting_confirmation', 'queued', 'failed')`
-          )
-          .run(now, file.storage_id, file.object_key);
-      });
+            const now = new Date().toISOString();
+            db.raw
+              .prepare("UPDATE files SET state = 'pending_delete', updated_at = ? WHERE id = ?")
+              .run(now, file.id);
+            return true;
+          });
 
-      // Remove local thumbnail cache only if no live file shares this sha256
-      const otherShaRef = db.raw
-        .prepare("SELECT 1 AS ok FROM files WHERE sha256 = ? AND state = 'ready' LIMIT 1")
-        .get(file.sha256) as { ok: number } | undefined;
-      if (!otherShaRef) {
-        const thumbRel = buildThumbnailRelPath(file.sha256);
-        const thumbAbs = resolveThumbnailAbsPath(config.cache.path, thumbRel);
-        await fsp.rm(thumbAbs, { force: true }).catch(() => {});
-      }
+          if (!stillUnreferenced) {
+            return;
+          }
 
-      deletedFiles += 1;
-      freedBytes += Number(file.size_bytes);
+          try {
+            const provider = storageRegistry.get(file.storage_id);
+            if (!provider) {
+              throw new Error(`存储空间 "${file.storage_id}" 当前不可用或离线，物理对象将保留待重试`);
+            }
+
+            await provider.delete(file.object_key);
+
+            const now = new Date().toISOString();
+            db.transaction(() => {
+              db.raw
+                .prepare(
+                  "UPDATE files SET state = 'deleted', last_error = NULL, updated_at = ? WHERE id = ? AND state = 'pending_delete'"
+                )
+                .run(now, file.id);
+              db.raw
+                .prepare(
+                  `UPDATE storage_cleanup_queue
+                   SET status = 'deleted', last_error = NULL, updated_at = ?
+                   WHERE storage_id = ? AND object_key = ? AND status IN ('awaiting_confirmation', 'queued', 'failed')`
+                )
+                .run(now, file.storage_id, file.object_key);
+            });
+
+            // Remove local thumbnail cache only if no live file shares this sha256
+            const otherShaRef = db.raw
+              .prepare("SELECT 1 AS ok FROM files WHERE sha256 = ? AND state IN ('staging', 'ready') LIMIT 1")
+              .get(file.sha256) as { ok: number } | undefined;
+            if (!otherShaRef) {
+              const thumbRel = buildThumbnailRelPath(file.sha256);
+              const thumbAbs = resolveThumbnailAbsPath(config.cache.path, thumbRel);
+              await fsp.rm(thumbAbs, { force: true }).catch(() => {});
+            }
+
+            deletedFiles += 1;
+            freedBytes += Number(file.size_bytes);
+          } catch (err) {
+            if (err instanceof Error && err.name === "JobCancelledError") {
+              throw err;
+            }
+            if (ctx.isCancelled()) {
+              ctx.throwIfCancelled();
+            }
+            const message = err instanceof Error ? err.message : String(err);
+            const now = new Date().toISOString();
+            db.transaction(() => {
+              db.raw
+                .prepare(
+                  "UPDATE files SET state = 'delete_failed', last_error = ?, updated_at = ? WHERE id = ?"
+                )
+                .run(message, now, file.id);
+              const existingQueue = db.raw
+                .prepare(
+                  `SELECT id FROM storage_cleanup_queue
+                   WHERE storage_id = ? AND object_key = ? AND status IN ('awaiting_confirmation', 'queued', 'failed')`
+                )
+                .get(file.storage_id, file.object_key) as { id: string } | undefined;
+              if (existingQueue) {
+                db.raw
+                  .prepare(
+                    "UPDATE storage_cleanup_queue SET status = 'failed', last_error = ?, updated_at = ? WHERE id = ?"
+                  )
+                  .run(message, now, existingQueue.id);
+              } else {
+                db.raw
+                  .prepare(
+                    `INSERT INTO storage_cleanup_queue (
+                       id, storage_id, object_key, sha256, size_bytes,
+                       reason, source_job_id, status, last_error, created_at, updated_at
+                     ) VALUES (?, ?, ?, ?, ?, 'gc_unreferenced', ?, 'failed', ?, ?, ?)`
+                  )
+                  .run(
+                    crypto.randomUUID(),
+                    file.storage_id,
+                    file.object_key,
+                    file.sha256,
+                    Number(file.size_bytes),
+                    ctx.jobId,
+                    message,
+                    now,
+                    now
+                  );
+              }
+            });
+            failedFiles += 1;
+            lastFailureMessage = message;
+          }
+        },
+        { signal: ctx.signal }
+      );
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err);
-      const now = new Date().toISOString();
-      db.transaction(() => {
-        db.raw
-          .prepare(
-            "UPDATE files SET state = 'delete_failed', last_error = ?, updated_at = ? WHERE id = ?"
-          )
-          .run(message, now, file.id);
-        const existingQueue = db.raw
-          .prepare(
-            `SELECT id FROM storage_cleanup_queue
-             WHERE storage_id = ? AND object_key = ? AND status IN ('awaiting_confirmation', 'queued', 'failed')`
-          )
-          .get(file.storage_id, file.object_key) as { id: string } | undefined;
-        if (existingQueue) {
-          db.raw
-            .prepare(
-              "UPDATE storage_cleanup_queue SET status = 'failed', last_error = ?, updated_at = ? WHERE id = ?"
-            )
-            .run(message, now, existingQueue.id);
-        } else {
-          db.raw
-            .prepare(
-              `INSERT INTO storage_cleanup_queue (
-                 id, storage_id, object_key, sha256, size_bytes,
-                 reason, source_job_id, status, last_error, created_at, updated_at
-               ) VALUES (?, ?, ?, ?, ?, 'gc_unreferenced', ?, 'failed', ?, ?, ?)`
-            )
-            .run(
-              crypto.randomUUID(),
-              file.storage_id,
-              file.object_key,
-              file.sha256,
-              Number(file.size_bytes),
-              ctx.jobId,
-              message,
-              now,
-              now
-            );
-        }
-      });
-      failedFiles += 1;
-      lastFailureMessage = message;
+      if (err instanceof Error && err.name === "JobCancelledError") {
+        throw err;
+      }
+      if (ctx.isCancelled()) {
+        ctx.throwIfCancelled();
+      }
+      throw err;
     } finally {
-      ctx.releaseLock(lockKey);
+      ctx.releaseLock(objectLockKey);
+      ctx.releaseLock(fileLockKey);
       ctx.updateProgress({
         stage: "deleting_unreferenced_files",
         current: index + 1,
