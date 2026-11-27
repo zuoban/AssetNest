@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
+import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { Link, NavLink, useLocation } from "react-router-dom";
 import {
   Activity,
@@ -23,8 +23,15 @@ import {
 } from "lucide-react";
 import type { AuthMeResponse, StorageProviderSummary } from "../../shared/types";
 import { api } from "../api/client";
-import { isMacPlatform } from "../utils/commandPalette";
-import { CommandPalette } from "./CommandPalette";
+import { isCommandKShortcut, isEditableElement, isMacPlatform } from "../utils/commandPalette";
+import { RouteErrorBoundary } from "./RouteErrorBoundary";
+
+const loadCommandPalette = () =>
+  import("./CommandPalette").then((m) => ({ default: m.CommandPalette }));
+const prefetchCommandPalette = () => {
+  void loadCommandPalette().catch(() => {});
+};
+const CommandPalette = lazy(loadCommandPalette);
 
 interface LayoutProps {
   auth: AuthMeResponse;
@@ -66,6 +73,8 @@ export function Layout({ auth, onLogout, children }: LayoutProps) {
   const isMac = useMemo(() => isMacPlatform(), []);
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [paletteOpen, setPaletteOpen] = useState(false);
+  const [paletteMounted, setPaletteMounted] = useState(false);
+  const paletteFailedRef = useRef(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const [offlineStorages, setOfflineStorages] = useState<StorageProviderSummary[]>([]);
   const [runningJobs, setRunningJobs] = useState(0);
@@ -107,8 +116,62 @@ export function Layout({ auth, onLogout, children }: LayoutProps) {
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [drawerOpen]);
 
-  const openPalette = useCallback(() => setPaletteOpen(true), []);
-  const closePalette = useCallback(() => setPaletteOpen(false), []);
+  const openPalette = useCallback(() => {
+    paletteFailedRef.current = false;
+    setPaletteMounted(true);
+    setPaletteOpen(true);
+  }, []);
+  const closePalette = useCallback(() => {
+    setPaletteOpen(false);
+    if (paletteFailedRef.current) {
+      paletteFailedRef.current = false;
+      setPaletteMounted(false);
+    }
+  }, []);
+  const handlePaletteError = useCallback(() => {
+    paletteFailedRef.current = true;
+  }, []);
+
+  // Global keyboard shortcuts for CommandPalette (kept in Layout so the palette chunk loads on demand)
+  useEffect(() => {
+    const handleGlobalKeyDown = (event: KeyboardEvent) => {
+      if (isCommandKShortcut(event)) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        if (paletteOpen) {
+          closePalette();
+        } else {
+          openPalette();
+        }
+        return;
+      }
+
+      if (paletteOpen && event.key === "Escape") {
+        if (event.isComposing || event.keyCode === 229) return;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        closePalette();
+        return;
+      }
+
+      if (
+        !paletteOpen &&
+        event.key === "/" &&
+        !event.metaKey &&
+        !event.ctrlKey &&
+        !event.altKey &&
+        !event.shiftKey &&
+        !isEditableElement(event.target) &&
+        !document.querySelector('[role="dialog"]')
+      ) {
+        event.preventDefault();
+        openPalette();
+      }
+    };
+
+    window.addEventListener("keydown", handleGlobalKeyDown, true);
+    return () => window.removeEventListener("keydown", handleGlobalKeyDown, true);
+  }, [paletteOpen, openPalette, closePalette]);
 
   const handleLogout = async () => {
     setLoggingOut(true);
@@ -233,6 +296,8 @@ export function Layout({ auth, onLogout, children }: LayoutProps) {
             <button
               type="button"
               onClick={openPalette}
+              onMouseEnter={prefetchCommandPalette}
+              onFocus={prefetchCommandPalette}
               title={`快速跳转 (${isMac ? "⌘K" : "Ctrl+K"})`}
               aria-label="打开快速跳转命令面板"
               className="group inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50/80 px-2.5 py-1.5 text-xs text-gray-500 transition-colors hover:border-gray-300 hover:bg-white hover:text-gray-800"
@@ -285,7 +350,22 @@ export function Layout({ auth, onLogout, children }: LayoutProps) {
         </main>
       </div>
 
-      <CommandPalette open={paletteOpen} onOpen={openPalette} onClose={closePalette} />
+      {paletteMounted && (
+        <RouteErrorBoundary
+          variant="dialog"
+          onError={handlePaletteError}
+          onDismiss={closePalette}
+        >
+          <Suspense fallback={null}>
+            <CommandPalette
+              open={paletteOpen}
+              onOpen={openPalette}
+              onClose={closePalette}
+              disableGlobalShortcuts
+            />
+          </Suspense>
+        </RouteErrorBoundary>
+      )}
     </div>
   );
 }

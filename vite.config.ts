@@ -14,7 +14,34 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   build: {
     outDir: path.resolve(import.meta.dirname, "dist/web"),
-    emptyOutDir: true
+    emptyOutDir: true,
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          const normalizedId = id.replace(/\\/g, "/");
+          if (!normalizedId.includes("/node_modules/")) return undefined;
+          if (
+            normalizedId.includes("/react/") ||
+            normalizedId.includes("/react-dom/") ||
+            normalizedId.includes("/react-router/") ||
+            normalizedId.includes("/react-router-dom/") ||
+            normalizedId.includes("/scheduler/")
+          ) {
+            return "vendor-react";
+          }
+          if (normalizedId.includes("/@dnd-kit/")) {
+            return "vendor-dnd";
+          }
+          if (normalizedId.includes("/@tanstack/")) {
+            return "vendor-virtual";
+          }
+          if (normalizedId.includes("/lucide-react/")) {
+            return "vendor-icons";
+          }
+          return undefined;
+        }
+      }
+    }
   },
   server: {
     host: "127.0.0.1",

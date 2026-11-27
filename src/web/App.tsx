@@ -1,21 +1,85 @@
-import { useCallback, useEffect, useState } from "react";
-import { BrowserRouter, Navigate, Route, Routes } from "react-router-dom";
+import { lazy, Suspense, useCallback, useEffect, useState } from "react";
+import { BrowserRouter, Navigate, Route, Routes, useLocation } from "react-router-dom";
 import type { AuthMeResponse } from "../shared/types";
 import { api, ApiClientError } from "./api/client";
 import { Layout } from "./components/Layout";
-import { AssetsPage } from "./pages/AssetsPage";
-import { DashboardPage } from "./pages/DashboardPage";
-import { JobsPage } from "./pages/JobsPage";
-import { ListingsPage } from "./pages/ListingsPage";
-import { ListingWorkbenchPage } from "./pages/ListingWorkbenchPage";
-import { LoginPage } from "./pages/LoginPage";
-import { ProductDetailPage } from "./pages/ProductDetailPage";
-import { ProductsPage } from "./pages/ProductsPage";
-import { SettingsPage } from "./pages/SettingsPage";
-import { StoragePage } from "./pages/StoragePage";
-import { StoresPage } from "./pages/StoresPage";
-import { TemplatesPage } from "./pages/TemplatesPage";
-import { TrashPage } from "./pages/TrashPage";
+import { RouteErrorBoundary } from "./components/RouteErrorBoundary";
+
+const AssetsPage = lazy(() =>
+  import("./pages/AssetsPage").then((m) => ({ default: m.AssetsPage }))
+);
+const DashboardPage = lazy(() =>
+  import("./pages/DashboardPage").then((m) => ({ default: m.DashboardPage }))
+);
+const JobsPage = lazy(() =>
+  import("./pages/JobsPage").then((m) => ({ default: m.JobsPage }))
+);
+const ListingsPage = lazy(() =>
+  import("./pages/ListingsPage").then((m) => ({ default: m.ListingsPage }))
+);
+const ListingWorkbenchPage = lazy(() =>
+  import("./pages/ListingWorkbenchPage").then((m) => ({ default: m.ListingWorkbenchPage }))
+);
+const LoginPage = lazy(() =>
+  import("./pages/LoginPage").then((m) => ({ default: m.LoginPage }))
+);
+const ProductDetailPage = lazy(() =>
+  import("./pages/ProductDetailPage").then((m) => ({ default: m.ProductDetailPage }))
+);
+const ProductsPage = lazy(() =>
+  import("./pages/ProductsPage").then((m) => ({ default: m.ProductsPage }))
+);
+const SettingsPage = lazy(() =>
+  import("./pages/SettingsPage").then((m) => ({ default: m.SettingsPage }))
+);
+const StoragePage = lazy(() =>
+  import("./pages/StoragePage").then((m) => ({ default: m.StoragePage }))
+);
+const StoresPage = lazy(() =>
+  import("./pages/StoresPage").then((m) => ({ default: m.StoresPage }))
+);
+const TemplatesPage = lazy(() =>
+  import("./pages/TemplatesPage").then((m) => ({ default: m.TemplatesPage }))
+);
+const TrashPage = lazy(() =>
+  import("./pages/TrashPage").then((m) => ({ default: m.TrashPage }))
+);
+
+function RouteLoadingFallback() {
+  return (
+    <div className="rounded-xl border border-gray-200 bg-white p-10 text-center text-xs text-gray-500">
+      正在加载页面...
+    </div>
+  );
+}
+
+function AppRoutes({ onTimezoneChanged }: { onTimezoneChanged: () => Promise<void> }) {
+  const location = useLocation();
+  return (
+    <RouteErrorBoundary resetKey={`${location.pathname}${location.search}`}>
+      <Suspense fallback={<RouteLoadingFallback />}>
+        <Routes>
+          <Route path="/" element={<DashboardPage />} />
+          <Route path="/products" element={<ProductsPage />} />
+          <Route path="/products/:id" element={<ProductDetailPage />} />
+          <Route path="/listings" element={<ListingsPage />} />
+          <Route path="/listings/:id" element={<ListingWorkbenchPage />} />
+          <Route path="/templates" element={<TemplatesPage />} />
+          <Route path="/stores" element={<StoresPage />} />
+          <Route path="/assets" element={<AssetsPage />} />
+          <Route path="/trash" element={<TrashPage />} />
+          <Route path="/storage" element={<StoragePage />} />
+          <Route path="/jobs" element={<JobsPage />} />
+          <Route
+            path="/settings"
+            element={<SettingsPage onTimezoneChanged={onTimezoneChanged} />}
+          />
+          <Route path="*" element={<Navigate to="/" replace />} />
+        </Routes>
+      </Suspense>
+    </RouteErrorBoundary>
+  );
+}
 
 export function App() {
   const [loading, setLoading] = useState(true);
@@ -83,30 +147,25 @@ export function App() {
   }
 
   if (!auth) {
-    return <LoginPage onLoggedIn={refreshAuthState} />;
+    return (
+      <RouteErrorBoundary>
+        <Suspense
+          fallback={
+            <div className="flex min-h-screen items-center justify-center bg-[#F8F9FA] text-sm text-gray-500">
+              正在加载登录页面...
+            </div>
+          }
+        >
+          <LoginPage onLoggedIn={refreshAuthState} />
+        </Suspense>
+      </RouteErrorBoundary>
+    );
   }
 
   return (
     <BrowserRouter>
       <Layout auth={auth} onLogout={handleLogout}>
-        <Routes>
-          <Route path="/" element={<DashboardPage />} />
-          <Route path="/products" element={<ProductsPage />} />
-          <Route path="/products/:id" element={<ProductDetailPage />} />
-          <Route path="/listings" element={<ListingsPage />} />
-          <Route path="/listings/:id" element={<ListingWorkbenchPage />} />
-          <Route path="/templates" element={<TemplatesPage />} />
-          <Route path="/stores" element={<StoresPage />} />
-          <Route path="/assets" element={<AssetsPage />} />
-          <Route path="/trash" element={<TrashPage />} />
-          <Route path="/storage" element={<StoragePage />} />
-          <Route path="/jobs" element={<JobsPage />} />
-          <Route
-            path="/settings"
-            element={<SettingsPage onTimezoneChanged={refreshAuthState} />}
-          />
-          <Route path="*" element={<Navigate to="/" replace />} />
-        </Routes>
+        <AppRoutes onTimezoneChanged={refreshAuthState} />
       </Layout>
     </BrowserRouter>
   );

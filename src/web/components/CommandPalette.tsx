@@ -73,6 +73,7 @@ export interface CommandPaletteProps {
   open: boolean;
   onOpen: () => void;
   onClose: () => void;
+  disableGlobalShortcuts?: boolean;
 }
 
 interface ScopeTabDef {
@@ -408,7 +409,12 @@ function recentKindMatchesScope(kind: RecentVisitKind, scope: CommandScope): boo
   return false;
 }
 
-export function CommandPalette({ open, onOpen, onClose }: CommandPaletteProps) {
+export function CommandPalette({
+  open,
+  onOpen,
+  onClose,
+  disableGlobalShortcuts = false
+}: CommandPaletteProps) {
   const navigate = useNavigate();
   const location = useLocation();
   const isMac = useMemo(() => isMacPlatform(), []);
@@ -443,6 +449,7 @@ export function CommandPalette({ open, onOpen, onClose }: CommandPaletteProps) {
 
   // Global keyboard shortcuts: Cmd/Ctrl+K, `/`, and capture-phase Escape when open
   useEffect(() => {
+    if (disableGlobalShortcuts) return;
     const handleGlobalKeyDown = (event: KeyboardEvent) => {
       if (isCommandKShortcut(event)) {
         event.preventDefault();
@@ -480,7 +487,7 @@ export function CommandPalette({ open, onOpen, onClose }: CommandPaletteProps) {
 
     window.addEventListener("keydown", handleGlobalKeyDown, true);
     return () => window.removeEventListener("keydown", handleGlobalKeyDown, true);
-  }, [open, onOpen, onClose]);
+  }, [open, onOpen, onClose, disableGlobalShortcuts]);
 
   // Reset state, focus input, and preload session cache when opening
   useEffect(() => {
