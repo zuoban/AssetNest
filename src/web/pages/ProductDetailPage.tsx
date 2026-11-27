@@ -17,6 +17,7 @@ import {
   Star,
   Trash2,
   Unlock,
+  Upload,
   X
 } from "lucide-react";
 import type {
@@ -35,6 +36,8 @@ import { api, ApiClientError } from "../api/client";
 import { AssetLightbox } from "../components/AssetLightbox";
 import { BatchAssetUpload, type PreparedUploadOptions } from "../components/BatchAssetUpload";
 import { ConfirmDialog, type ConfirmDialogState } from "../components/ConfirmDialog";
+import { ProductCostFields } from "../components/ProductCostFields";
+import { parseProductCostDraft, productCostKeys, toProductCostDraft } from "../utils/productCosts";
 import {
   formatAspectRatio,
   formatBytes,
@@ -69,7 +72,6 @@ export function ProductDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [tab, setTab] = useState<"overview" | "skus" | "assets" | "listings">("overview");
-  const [assetsTabOpened, setAssetsTabOpened] = useState(false);
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null);
   const [confirmBusy, setConfirmBusy] = useState(false);
 
@@ -83,6 +85,7 @@ export function ProductDetailPage() {
   const [supplierUrl, setSupplierUrl] = useState("");
   const [status, setStatus] = useState<ProductStatus>("active");
   const [notes, setNotes] = useState("");
+  const [costDraft, setCostDraft] = useState(() => toProductCostDraft());
   const [specs, setSpecs] = useState<SpecRow[]>([]);
   const [constraints, setConstraints] = useState<AppearanceConstraints>({});
   const [saving, setSaving] = useState(false);
@@ -102,6 +105,7 @@ export function ProductDetailPage() {
   const [skuError, setSkuError] = useState<string | null>(null);
 
   // Asset upload & lightbox
+  const [uploadProductId, setUploadProductId] = useState<string | null>(null);
   const [compressUploadImages, setCompressUploadImages] = useState(true);
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
 
@@ -151,6 +155,7 @@ export function ProductDetailPage() {
     setSupplierUrl(detail.supplierUrl);
     setStatus(detail.status);
     setNotes(detail.notes);
+    setCostDraft(toProductCostDraft(detail));
     setSpecs(
       detail.specs.length > 0
         ? detail.specs.map((s) => ({ specKey: s.specKey, specValue: s.specValue, unit: s.unit }))
@@ -227,7 +232,13 @@ export function ProductDetailPage() {
 
   const handleSaveOverview = async (event: FormEvent) => {
     event.preventDefault();
-    if (!id) return;
+    if (!id || !product) return;
+    const { values: costs, errors: costErrors } = parseProductCostDraft(costDraft);
+    if (Object.keys(costErrors).length > 0) return;
+
+    const changedCosts = Object.fromEntries(
+      productCostKeys.filter((key) => costs[key] !== product[key]).map((key) => [key, costs[key]])
+    );
     setSaving(true);
     setError(null);
     setNotice(null);
@@ -242,6 +253,7 @@ export function ProductDetailPage() {
         .filter((row) => row.specKey && row.specValue);
 
       const updated = await api.updateProduct(id, {
+        ...changedCosts,
         spu: spu.trim(),
         nameZh: nameZh.trim(),
         nameEn: nameEn.trim(),
@@ -383,6 +395,7 @@ export function ProductDetailPage() {
         res.deduplicatedCount > 0 ? `（其中 ${res.deduplicatedCount} 个复用已有底层文件）` : ""
       }${formatUploadCompression(res.compression)}`
     );
+    setUploadProductId((current) => current === id ? null : current);
     await loadAll();
   };
 
@@ -635,10 +648,7 @@ export function ProductDetailPage() {
           <button
             key={item.key}
             type="button"
-            onClick={() => {
-              if (item.key === "assets") setAssetsTabOpened(true);
-              setTab(item.key);
-            }}
+            onClick={() => setTab(item.key)}
             className={`border-b-2 px-4 py-2.5 text-xs font-medium transition-colors ${
               tab === item.key
                 ? "border-blue-600 text-blue-600"
@@ -753,6 +763,11 @@ export function ProductDetailPage() {
                 />
               </div>
             </div>
+          </section>
+
+          <section className="rounded-xl border border-gray-200 bg-white p-5" aria-labelledby="product-cost-heading">
+            <h2 id="product-cost-heading" className="mb-3.5 text-sm font-semibold text-gray-900">采购成本与箱规</h2>
+            <ProductCostFields draft={costDraft} onChange={setCostDraft} />
           </section>
 
           <section className="rounded-xl border border-gray-200 bg-white p-5">
@@ -1017,8 +1032,8 @@ export function ProductDetailPage() {
         </div>
       )}
 
-      {assetsTabOpened && (
-        <div hidden={tab !== "assets"} className="space-y-4">
+      {tab === "assets" && (
+        <div className="space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <p className="text-xs text-gray-500">
               此处上传的素材将自动关联至当前商品（{product.spu}），支持设为封面图、锁定多视角母图以及与母图并排对比。
@@ -1042,17 +1057,21 @@ export function ProductDetailPage() {
                 <Columns className="h-3.5 w-3.5" />
                 <span>{compareOpen ? "收起并排对比" : "母图并排对比"}</span>
               </button>
+              <button
+                type="button"
+                aria-haspopup="dialog"
+                disabled={product.id !== id}
+                onClick={() => {
+                  setError(null);
+                  setUploadProductId(product.id);
+                }}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+              >
+                <Upload className="h-3.5 w-3.5" />
+                <span>上传素材</span>
+              </button>
             </div>
           </div>
-
-          <BatchAssetUpload
-            key={id}
-            className="space-y-2.5 rounded-xl border border-gray-200 bg-white p-4 text-xs"
-            compression={{ checked: compressUploadImages, onChange: setCompressUploadImages }}
-            onFilesAdded={() => setError(null)}
-            onSubmit={handleUploadLinkedAssets}
-            onError={setError}
-          />
 
           {/* Locked Master Images Panel */}
           <section className="rounded-xl border border-gray-200 bg-white p-4">
@@ -1434,6 +1453,16 @@ export function ProductDetailPage() {
             </div>
           )}
         </div>
+      )}
+
+      {uploadProductId && uploadProductId === id && (
+        <BatchAssetUpload
+          key={uploadProductId}
+          dialogTitle="批量上传素材"
+          compression={{ checked: compressUploadImages, onChange: setCompressUploadImages }}
+          onClose={() => setUploadProductId(null)}
+          onSubmit={handleUploadLinkedAssets}
+        />
       )}
 
       {tab === "listings" && (

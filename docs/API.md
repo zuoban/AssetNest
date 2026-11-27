@@ -44,9 +44,9 @@
 | Method & Path | 说明 |
 |---|---|
 | `GET /api/v1/products` | 分页搜索商品（支持 `q`、`status`、`category`） |
-| `POST /api/v1/products` | 创建商品（含自定义规格 `specs`） |
-| `GET /api/v1/products/:id` | 商品详情（含规格、SKU 列表、统计与关联素材概览） |
-| `PATCH /api/v1/products/:id` | 更新商品字段、规格、外观约束、归档状态 |
+| `POST /api/v1/products` | 创建商品（含自定义规格 `specs` 与可选采购及海运成本字段） |
+| `GET /api/v1/products/:id` | 商品详情（含规格、SKU 列表、统计、关联素材概览及采购和海运成本字段） |
+| `PATCH /api/v1/products/:id` | 更新商品字段、规格、外观约束、归档状态及采购和海运成本字段 |
 | `DELETE /api/v1/products/:id` | 软删除商品（返回历史引用影响提示） |
 | `POST /api/v1/products/:id/skus` | 创建 SKU（校验全空间 code 唯一及同商品规格组合唯一） |
 | `PATCH /api/v1/products/:id/skus/:skuId` | 更新 SKU |
@@ -63,6 +63,8 @@
 | `POST /api/v1/assets/:id/versions/:versionId/regenerate-thumbnail` | 手动重建损坏/缺失缩略图 |
 | `GET /api/v1/trash` | 查看回收站（商品、Listing、素材） |
 | `POST /api/v1/trash/restore` | 恢复软删除对象及其关系 |
+
+商品成本字段包括 `purchasePrice`（元/件）、`cartonLengthCm`、`cartonWidthCm`、`cartonHeightCm`（外箱尺寸，厘米）、`unitsPerCarton`（每箱件数）和 `seaFreightRate`（元/立方米）。创建时可以省略，更新时传 `null` 可清空相应字段。
 
 ### M2：存储运维、迁移、任务控制、GC 与备份
 

@@ -45,7 +45,17 @@ const listProductsQuerySchema = z.object({
   pageSize: z.coerce.number().int().min(1).max(100).default(24)
 });
 
+const productCostFields = {
+  purchasePrice: z.number().finite().nonnegative().nullish(),
+  cartonLengthCm: z.number().finite().positive().nullish(),
+  cartonWidthCm: z.number().finite().positive().nullish(),
+  cartonHeightCm: z.number().finite().positive().nullish(),
+  unitsPerCarton: z.number().int().positive().safe().nullish(),
+  seaFreightRate: z.number().finite().nonnegative().nullish()
+};
+
 const createProductSchema = z.object({
+  ...productCostFields,
   spu: z.string().trim().min(1, "SPU 不能为空").max(80),
   nameZh: z.string().trim().min(1, "商品中文名不能为空").max(200),
   nameEn: z.string().trim().max(200).optional(),
@@ -60,6 +70,7 @@ const createProductSchema = z.object({
 });
 
 const updateProductSchema = z.object({
+  ...productCostFields,
   spu: z.string().trim().min(1).max(80).optional(),
   nameZh: z.string().trim().min(1).max(200).optional(),
   nameEn: z.string().trim().max(200).optional(),

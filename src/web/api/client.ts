@@ -33,6 +33,7 @@ import type {
   PaginatedResponse,
   PdpContent,
   PdpVersionRecord,
+  ProductCostInputs,
   ProductDetail,
   ProductMasterImageRecord,
   ProductSpec,
@@ -310,7 +311,7 @@ export const api = {
     const query = qs.toString();
     return requestJson(`/api/v1/products${query ? `?${query}` : ""}`);
   },
-  createProduct(payload: {
+  createProduct(payload: Partial<ProductCostInputs> & {
     spu: string;
     nameZh: string;
     nameEn?: string;
@@ -333,7 +334,7 @@ export const api = {
   },
   updateProduct(
     id: string,
-    payload: {
+    payload: Partial<ProductCostInputs> & {
       spu?: string;
       nameZh?: string;
       nameEn?: string;

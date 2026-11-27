@@ -13,6 +13,8 @@ import {
 } from "lucide-react";
 import type { ProductStatus, ProductSummary } from "../../shared/types";
 import { api, ApiClientError } from "../api/client";
+import { ProductCostFields } from "../components/ProductCostFields";
+import { parseProductCostDraft, toProductCostDraft } from "../utils/productCosts";
 import { formatDateTime, PRODUCT_STATUS_META } from "../utils/format";
 
 interface DraftSpecRow {
@@ -45,6 +47,7 @@ export function ProductsPage() {
   const [supplierUrl, setSupplierUrl] = useState("");
   const [status, setStatus] = useState<ProductStatus>("active");
   const [notes, setNotes] = useState("");
+  const [costDraft, setCostDraft] = useState(() => toProductCostDraft());
   const [specs, setSpecs] = useState<DraftSpecRow[]>([{ specKey: "", specValue: "", unit: "" }]);
 
   const loadProducts = useCallback(async () => {
@@ -83,6 +86,7 @@ export function ProductsPage() {
     setSupplierUrl("");
     setStatus("active");
     setNotes("");
+    setCostDraft(toProductCostDraft());
     setSpecs([{ specKey: "", specValue: "", unit: "" }]);
     setFormError(null);
   };
@@ -91,6 +95,12 @@ export function ProductsPage() {
     event.preventDefault();
     if (!spu.trim() || !nameZh.trim()) {
       setFormError("请填写 SPU 编码与商品中文名");
+      return;
+    }
+    const { values: costs, errors: costErrors } = parseProductCostDraft(costDraft);
+    const [costError] = Object.values(costErrors);
+    if (costError) {
+      setFormError(costError);
       return;
     }
     setCreating(true);
@@ -106,6 +116,7 @@ export function ProductsPage() {
         .filter((row) => row.specKey && row.specValue);
 
       const created = await api.createProduct({
+        ...costs,
         spu: spu.trim(),
         nameZh: nameZh.trim(),
         nameEn: nameEn.trim(),
@@ -577,6 +588,16 @@ export function ProductsPage() {
                   className="w-full rounded-lg border border-gray-200 px-3 py-2 focus:border-blue-500 focus:outline-none"
                 />
               </div>
+
+              <details
+                className="rounded-lg border border-gray-200 px-3 py-2.5"
+                onInvalid={(event) => { event.currentTarget.open = true; }}
+              >
+                <summary className="cursor-pointer font-medium text-gray-700">采购成本与箱规（选填）</summary>
+                <div className="mt-3">
+                  <ProductCostFields draft={costDraft} onChange={setCostDraft} />
+                </div>
+              </details>
 
               <div className="flex items-center justify-end gap-2 border-t border-gray-100 pt-3">
                 <button

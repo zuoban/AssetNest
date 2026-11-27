@@ -2,6 +2,7 @@ import crypto from "node:crypto";
 import type {
   AppearanceConstraints,
   PaginatedResponse,
+  ProductCostInputs,
   ProductDetail,
   ProductSpec,
   ProductStatus,
@@ -26,7 +27,7 @@ export interface ProductListQuery {
   pageSize: number;
 }
 
-export interface CreateProductInput {
+export interface CreateProductInput extends Partial<ProductCostInputs> {
   spu: string;
   nameZh: string;
   nameEn?: string;
@@ -40,7 +41,7 @@ export interface CreateProductInput {
   specs?: Array<{ specKey: string; specValue: string; unit?: string; position?: number }>;
 }
 
-export interface UpdateProductInput {
+export interface UpdateProductInput extends Partial<ProductCostInputs> {
   spu?: string;
   nameZh?: string;
   nameEn?: string;
@@ -72,6 +73,17 @@ export interface UpdateSkuInput {
   primaryAssetVersionId?: string | null;
   status?: SkuStatus;
 }
+
+const productCostColumns = {
+  purchasePrice: "purchase_price",
+  cartonLengthCm: "carton_length_cm",
+  cartonWidthCm: "carton_width_cm",
+  cartonHeightCm: "carton_height_cm",
+  unitsPerCarton: "units_per_carton",
+  seaFreightRate: "sea_freight_rate"
+} as const satisfies Record<keyof ProductCostInputs, string>;
+
+const productCostKeys = Object.keys(productCostColumns) as Array<keyof ProductCostInputs>;
 
 interface ProductRow {
   id: string;
@@ -242,13 +254,14 @@ export function getProductDetail(db: AppDatabase, productId: string): ProductDet
          p.id, p.spu, p.name_zh, p.name_en, p.category, p.brand_model,
          p.supplier_name, p.supplier_url, p.cover_version_id,
          (SELECT av.asset_id FROM asset_versions av WHERE av.id = p.cover_version_id) AS cover_asset_id,
+         ${productCostKeys.map((key) => `p.${productCostColumns[key]} AS ${key}`).join(", ")},
          p.status, p.notes, p.appearance_constraints_json, p.created_at, p.updated_at,
          (SELECT COUNT(*) FROM skus s WHERE s.product_id = p.id) AS sku_count,
          (SELECT COUNT(*) FROM product_assets pa JOIN assets a ON a.id = pa.asset_id WHERE pa.product_id = p.id AND a.deleted_at IS NULL) AS asset_count
        FROM products p
        WHERE p.id = ? AND p.deleted_at IS NULL`
     )
-    .get(productId) as unknown as ProductRow | undefined;
+    .get(productId) as unknown as (ProductRow & ProductCostInputs) | undefined;
 
   if (!row) {
     throw new AppError(404, "NOT_FOUND", "商品不存在或已进入回收站");
@@ -289,6 +302,12 @@ export function getProductDetail(db: AppDatabase, productId: string): ProductDet
 
   return {
     ...mapProductSummary(row),
+    purchasePrice: row.purchasePrice,
+    cartonLengthCm: row.cartonLengthCm,
+    cartonWidthCm: row.cartonWidthCm,
+    cartonHeightCm: row.cartonHeightCm,
+    unitsPerCarton: row.unitsPerCarton,
+    seaFreightRate: row.seaFreightRate,
     appearanceConstraints: safeJsonParse<AppearanceConstraints>(row.appearance_constraints_json, {}),
     specs,
     skus: skuRows.map(mapSkuRow)
@@ -310,8 +329,9 @@ export function createProduct(
           `INSERT INTO products (
              id, spu, name_zh, name_en, category, brand_model,
              supplier_name, supplier_url, status, notes,
-             appearance_constraints_json, created_at, updated_at
-           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+             appearance_constraints_json, created_at, updated_at,
+             ${productCostKeys.map((key) => productCostColumns[key]).join(", ")}
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ${productCostKeys.map(() => "?").join(", ")})`
         )
         .run(
           productId,
@@ -326,7 +346,8 @@ export function createProduct(
           input.notes ?? "",
           JSON.stringify(input.appearanceConstraints ?? {}),
           now,
-          now
+          now,
+          ...productCostKeys.map((key) => input[key] ?? null)
         );
 
       if (input.specs && input.specs.length > 0) {
@@ -395,7 +416,15 @@ export function updateProduct(
   try {
     db.transaction(() => {
       const sets: string[] = ["updated_at = ?"];
-      const params: Array<string | null> = [now];
+      const params: Array<string | number | null> = [now];
+
+      for (const key of productCostKeys) {
+        const value = input[key];
+        if (value !== undefined) {
+          sets.push(`${productCostColumns[key]} = ?`);
+          params.push(value);
+        }
+      }
 
       if (input.spu !== undefined) {
         sets.push("spu = ?");

@@ -230,7 +230,16 @@ export interface ProductSummary {
   updatedAt: string;
 }
 
-export interface ProductDetail extends ProductSummary {
+export interface ProductCostInputs {
+  purchasePrice: number | null;
+  cartonLengthCm: number | null;
+  cartonWidthCm: number | null;
+  cartonHeightCm: number | null;
+  unitsPerCarton: number | null;
+  seaFreightRate: number | null;
+}
+
+export interface ProductDetail extends ProductSummary, ProductCostInputs {
   appearanceConstraints: AppearanceConstraints;
   specs: ProductSpec[];
   skus: SkuRecord[];

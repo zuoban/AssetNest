@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { openDatabase } from "../../src/server/db/database.js";
 import { getCurrentSchemaVersion, getDefaultMigrationsDir, runMigrations } from "../../src/server/db/migrator.js";
+import { getProductDetail } from "../../src/server/modules/products/service.js";
 import { upsertSearchDocument } from "../../src/server/modules/search/service.js";
 
 const tempDirs: string[] = [];
@@ -56,6 +57,37 @@ describe("SQLite database & migrator", () => {
       const match = db.raw.prepare("SELECT entity_id FROM search_fts WHERE search_fts MATCH ?");
       expect(match.all("legacyreviewword")).toEqual([]);
       expect(match.all("bottle")).toEqual([{ entity_id: "asset" }]);
+    } finally {
+      db.close();
+    }
+  });
+
+  it("upgrades a v7 database with existing products and leaves new cost fields empty", () => {
+    const dir = makeTempDir();
+    const previousMigrationsDir = path.join(dir, "previous-migrations");
+    fs.mkdirSync(previousMigrationsDir);
+    const migrationsDir = getDefaultMigrationsDir();
+    for (const file of fs.readdirSync(migrationsDir).filter((name) => /^000[1-7]_.*\.sql$/.test(name))) {
+      fs.copyFileSync(path.join(migrationsDir, file), path.join(previousMigrationsDir, file));
+    }
+    const db = openDatabase({ dbPath: path.join(dir, "assetnest.db") });
+
+    try {
+      runMigrations(db, previousMigrationsDir);
+      db.raw.exec(`
+        INSERT INTO products (id, spu, name_zh, created_at, updated_at)
+        VALUES ('old', 'OLD-SPU', '旧商品', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+        INSERT INTO product_specs (id, product_id, spec_key, spec_value)
+        VALUES ('old-spec', 'old', '材质', '不锈钢');
+      `);
+
+      expect(runMigrations(db).map(({ name }) => name)).toContain("0008_product_costs.sql");
+      expect(getProductDetail(db, "old")).toMatchObject({
+        spu: "OLD-SPU", nameZh: "旧商品",
+        specs: [expect.objectContaining({ specKey: "材质", specValue: "不锈钢" })],
+        purchasePrice: null, cartonLengthCm: null, cartonWidthCm: null, cartonHeightCm: null,
+        unitsPerCarton: null, seaFreightRate: null
+      });
     } finally {
       db.close();
     }

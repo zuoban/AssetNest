@@ -90,6 +90,64 @@ afterEach(async () => {
 });
 
 describe("M1 API integration (Products, SKUs, Assets, Deduplication, Search, Security, Trash)", () => {
+  it("persists partial product costs and distinguishes zero, omitted and cleared values", async () => {
+    const { runtime, config, cookie } = await bootAuthedApp();
+    const headers = { cookie, "x-assetnest-request": "1" };
+    const productFields = { spu: "SPU-COST", nameZh: "采购成本测试" };
+    const initialCosts = {
+      purchasePrice: 0,
+      seaFreightRate: 0,
+      cartonLengthCm: 17.125,
+      cartonWidthCm: null,
+      cartonHeightCm: 23.875,
+      unitsPerCarton: 12
+    };
+    const created = await runtime.app.inject({
+      method: "POST", url: "/api/v1/products", headers, payload: { ...productFields, ...initialCosts }
+    });
+    expect(created.statusCode).toBe(201);
+    expect(created.json()).toMatchObject(initialCosts);
+    const url = `/api/v1/products/${created.json().id}`;
+
+    const savedCosts = { ...initialCosts, purchasePrice: 12.34567, cartonWidthCm: 9.12345, cartonHeightCm: null };
+    const updated = await runtime.app.inject({
+      method: "PATCH", url, headers,
+      payload: { purchasePrice: savedCosts.purchasePrice, cartonWidthCm: savedCosts.cartonWidthCm, cartonHeightCm: null }
+    });
+    expect(updated.statusCode).toBe(200);
+    expect(updated.json()).toMatchObject(savedCosts);
+
+    for (const payload of [
+      { purchasePrice: -0.1 }, { seaFreightRate: "0" }, { seaFreightRate: -1 },
+      { cartonLengthCm: 0 }, { cartonWidthCm: -1 }, { cartonHeightCm: "23" },
+      { unitsPerCarton: 0 }, { unitsPerCarton: 1.5 }, { unitsPerCarton: Number.MAX_SAFE_INTEGER + 1 }
+    ]) {
+      const rejected = await runtime.app.inject({ method: "PATCH", url, headers, payload });
+      expect(rejected.statusCode, JSON.stringify(payload)).toBe(400);
+    }
+    const rejectedCreate = await runtime.app.inject({
+      method: "POST", url: "/api/v1/products", headers,
+      payload: { ...productFields, spu: "SPU-BAD-COST", unitsPerCarton: 1.5 }
+    });
+    expect(rejectedCreate.statusCode).toBe(400);
+
+    await runtime.close();
+    const reopened = await createApp({ config, logger: false, startWorker: false });
+    runtimes.push(reopened);
+    const detail = await reopened.app.inject({ method: "GET", url, headers });
+    expect(detail.statusCode).toBe(200);
+    expect(detail.json()).toMatchObject(savedCosts);
+
+    const clearedCosts = {
+      purchasePrice: null, seaFreightRate: null, cartonLengthCm: null,
+      cartonWidthCm: null, cartonHeightCm: null, unitsPerCarton: null
+    };
+    const cleared = await reopened.app.inject({ method: "PATCH", url, headers, payload: clearedCosts });
+    expect(cleared.statusCode).toBe(200);
+    const loadedAgain = await reopened.app.inject({ method: "GET", url, headers });
+    expect(loadedAgain.statusCode).toBe(200);
+    expect(loadedAgain.json()).toMatchObject({ ...productFields, ...clearedCosts });
+  });
   it("enforces Product/SKU uniqueness and supports content-addressed deduplication with independent asset lifecycles", async () => {
     const { runtime, cookie } = await bootAuthedApp();
     const authHeaders = { cookie, "x-assetnest-request": "1" };
