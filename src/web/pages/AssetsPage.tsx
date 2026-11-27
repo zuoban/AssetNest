@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Link, useSearchParams } from "react-router-dom";
+import { Link, useLocation, useSearchParams } from "react-router-dom";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   AlertCircle,
@@ -85,8 +85,10 @@ const DIMENSION_ORDER: TagDimension[] = [
 ];
 
 export function AssetsPage() {
+  const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
   const scrollParentRef = useRef<HTMLDivElement>(null);
+  const skipNextUrlSyncRef = useRef(false);
 
   // Taxonomy & reference lists
   const [folders, setFolders] = useState<FolderRecord[]>([]);
@@ -96,22 +98,23 @@ export function AssetsPage() {
   const [stores, setStores] = useState<StoreRecord[]>([]);
 
   const initialQuickViewParam = searchParams.get("quickView");
+  const initialFolderId = searchParams.get("folderId") || "";
   const initialQuickView: QuickView =
-    initialQuickViewParam === "favorite" ||
-    initialQuickViewParam === "unfiled"
+    !initialFolderId &&
+    (initialQuickViewParam === "favorite" || initialQuickViewParam === "unfiled")
       ? initialQuickViewParam
       : "all";
 
   // Filter state
   const [quickView, setQuickView] = useState<QuickView>(initialQuickView);
-  const [folderId, setFolderId] = useState<string>("");
+  const [folderId, setFolderId] = useState<string>(initialFolderId);
   const [includeSubfolders, setIncludeSubfolders] = useState<boolean>(true);
-  const [tagId, setTagId] = useState<string>("");
+  const [tagId, setTagId] = useState<string>(searchParams.get("tagId") || "");
   const [storageId, setStorageId] = useState<string>("");
   const [productId, setProductId] = useState<string>(searchParams.get("productId") || "");
-  const [storeId, setStoreId] = useState<string>("");
+  const [storeId, setStoreId] = useState<string>(searchParams.get("storeId") || "");
   const [assetType, setAssetType] = useState<AssetType | "">("");
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(searchParams.get("q") || "");
   const [sort, setSort] = useState<"newest" | "oldest" | "name_asc" | "size_desc">("newest");
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
 
@@ -124,7 +127,9 @@ export function AssetsPage() {
 
   // Selection & Inspector
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
-  const [activeAssetId, setActiveAssetId] = useState<string | null>(null);
+  const [activeAssetId, setActiveAssetId] = useState<string | null>(
+    searchParams.get("assetId") || null
+  );
   const [activeAsset, setActiveAsset] = useState<AssetDetail | null>(null);
   const [inspectorLoading, setInspectorLoading] = useState(false);
   const [thumbBustMap, setThumbBustMap] = useState<Record<string, number>>({});
@@ -337,6 +342,65 @@ export function AssetsPage() {
       query.trim()
   );
 
+  useEffect(() => {
+    if (skipNextUrlSyncRef.current) {
+      skipNextUrlSyncRef.current = false;
+      return;
+    }
+
+    const urlAction = searchParams.get("action");
+    const urlQuickView = searchParams.get("quickView");
+    const urlFolderId = searchParams.get("folderId") || "";
+    const urlProductId = searchParams.get("productId") || "";
+    const urlStoreId = searchParams.get("storeId") || "";
+    const urlTagId = searchParams.get("tagId") || "";
+    const urlQ = searchParams.get("q") || "";
+    const urlAssetId = searchParams.get("assetId") || "";
+
+    const hasOtherParams = Boolean(
+      urlQuickView !== null ||
+        searchParams.has("folderId") ||
+        searchParams.has("productId") ||
+        searchParams.has("storeId") ||
+        searchParams.has("tagId") ||
+        searchParams.has("q") ||
+        searchParams.has("assetId")
+    );
+
+    if (urlAction === "upload") {
+      setUploadTargetProductId(urlProductId || productId);
+      setUploadTargetFolderId(urlFolderId || folderId);
+      setUploadTargetStorageId(storageId);
+      setUploadModalOpen(true);
+
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.delete("action");
+      skipNextUrlSyncRef.current = true;
+      setSearchParams(nextParams, { replace: true });
+
+      if (!hasOtherParams) {
+        return;
+      }
+    }
+
+    if (urlFolderId) {
+      setFolderId(urlFolderId);
+      setQuickView("all");
+    } else {
+      setFolderId("");
+      setQuickView(
+        urlQuickView === "favorite" || urlQuickView === "unfiled" ? urlQuickView : "all"
+      );
+    }
+    setProductId(urlProductId);
+    setStoreId(urlStoreId);
+    setTagId(urlTagId);
+    setQuery(urlQ);
+    if (urlAssetId) {
+      setActiveAssetId(urlAssetId);
+    }
+  }, [searchParams, location.key, setSearchParams]);
+
   const resetAllFilters = () => {
     setQuickView("all");
     setFolderId("");
@@ -350,6 +414,12 @@ export function AssetsPage() {
     const nextParams = new URLSearchParams(searchParams);
     nextParams.delete("productId");
     nextParams.delete("quickView");
+    nextParams.delete("folderId");
+    nextParams.delete("storeId");
+    nextParams.delete("tagId");
+    nextParams.delete("q");
+    nextParams.delete("assetId");
+    skipNextUrlSyncRef.current = true;
     setSearchParams(nextParams, { replace: true });
   };
 
@@ -1098,6 +1168,7 @@ export function AssetsPage() {
                   const nextParams = new URLSearchParams(searchParams);
                   if (nextVal) nextParams.set("productId", nextVal);
                   else nextParams.delete("productId");
+                  skipNextUrlSyncRef.current = true;
                   setSearchParams(nextParams, { replace: true });
                 }}
                 className="max-w-[132px] rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs text-gray-700 focus:border-blue-500 focus:outline-none"

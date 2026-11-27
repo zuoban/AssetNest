@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router-dom";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Link, useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import {
   Copy,
   Images,
@@ -22,9 +22,18 @@ import { api } from "../api/client";
 import { ConfirmDialog, type ConfirmDialogState } from "../components/ConfirmDialog";
 import { formatDateTime, LISTING_STATUS_META } from "../utils/format";
 
+function parseListingStatusParam(raw: string | null): "" | ListingStatus {
+  if (raw === "draft" || raw === "ready" || raw === "published" || raw === "archived") {
+    return raw;
+  }
+  return "";
+}
+
 export function ListingsPage() {
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
+  const location = useLocation();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const skipNextUrlSyncRef = useRef(false);
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -40,6 +49,8 @@ export function ListingsPage() {
   const [stores, setStores] = useState<StoreRecord[]>([]);
   const [products, setProducts] = useState<ProductSummary[]>([]);
   const [dictionaries, setDictionaries] = useState<DictionariesResponse | null>(null);
+  const [metaLoaded, setMetaLoaded] = useState(false);
+  const [pendingAutoCreate, setPendingAutoCreate] = useState(false);
 
   // Filters
   const [q, setQ] = useState(searchParams.get("q") ?? "");
@@ -47,8 +58,8 @@ export function ListingsPage() {
   const [storeIdFilter, setStoreIdFilter] = useState(searchParams.get("storeId") ?? "");
   const [platformFilter, setPlatformFilter] = useState(searchParams.get("platform") ?? "");
   const [marketFilter, setMarketFilter] = useState(searchParams.get("market") ?? "");
-  const [statusFilter, setStatusFilter] = useState<"" | ListingStatus>(
-    (searchParams.get("status") as "" | ListingStatus) ?? ""
+  const [statusFilter, setStatusFilter] = useState<"" | ListingStatus>(() =>
+    parseListingStatusParam(searchParams.get("status"))
   );
 
   // Create Listing Modal
@@ -82,6 +93,8 @@ export function ListingsPage() {
       setDictionaries(dictsRes);
     } catch {
       // handled when loading listings
+    } finally {
+      setMetaLoaded(true);
     }
   }, []);
 
@@ -126,23 +139,81 @@ export function ListingsPage() {
     return list?.find((d) => d.code === code)?.label ?? code;
   };
 
-  const openCreateModal = () => {
+  const openCreateModal = useCallback(() => {
     const firstProduct = products[0];
     const firstActiveStore = stores.find((s) => s.status === "active") ?? stores[0];
+    const selectedProduct = products.find((p) => p.id === productIdFilter) ?? firstProduct;
+    const selectedStore = stores.find((s) => s.id === storeIdFilter) ?? firstActiveStore;
     setNewProductId(productIdFilter || firstProduct?.id || "");
     setNewStoreId(storeIdFilter || firstActiveStore?.id || "");
     setNewDisplayName(
-      firstProduct && firstActiveStore
-        ? `${firstProduct.nameZh} · ${firstActiveStore.name}`
+      selectedProduct && selectedStore
+        ? `${selectedProduct.nameZh} · ${selectedStore.name}`
         : ""
     );
-    setNewLanguage(firstActiveStore?.defaultLanguage ?? "en");
+    setNewLanguage(selectedStore?.defaultLanguage ?? "en");
     setNewExternalId("");
     setNewExternalUrl("");
     setNewStatus("draft");
     setNewNotes("");
     setCreateOpen(true);
-  };
+  }, [products, stores, productIdFilter, storeIdFilter]);
+
+  useEffect(() => {
+    if (skipNextUrlSyncRef.current) {
+      skipNextUrlSyncRef.current = false;
+      return;
+    }
+
+    const urlAction = searchParams.get("action");
+    const hasFilterParams = Boolean(
+      searchParams.has("q") ||
+        searchParams.has("productId") ||
+        searchParams.has("storeId") ||
+        searchParams.has("platform") ||
+        searchParams.has("market") ||
+        searchParams.has("status")
+    );
+
+    if (urlAction === "new") {
+      setPendingAutoCreate(true);
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.delete("action");
+      skipNextUrlSyncRef.current = true;
+      setSearchParams(nextParams, { replace: true });
+      if (!hasFilterParams) {
+        return;
+      }
+    }
+
+    setQ(searchParams.get("q") ?? "");
+    setProductIdFilter(searchParams.get("productId") ?? "");
+    setStoreIdFilter(searchParams.get("storeId") ?? "");
+    setPlatformFilter(searchParams.get("platform") ?? "");
+    setMarketFilter(searchParams.get("market") ?? "");
+    setStatusFilter(parseListingStatusParam(searchParams.get("status")));
+    setPage(1);
+  }, [searchParams, location.key, setSearchParams]);
+
+  useEffect(() => {
+    if (!metaLoaded || !pendingAutoCreate) return;
+    openCreateModal();
+    setPendingAutoCreate(false);
+  }, [metaLoaded, pendingAutoCreate, openCreateModal]);
+
+  useEffect(() => {
+    if (!createOpen && !dupTarget) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      if (dupTarget && !duplicating) {
+        setDupTarget(null);
+      } else if (createOpen && !creating) {
+        setCreateOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [createOpen, creating, dupTarget, duplicating]);
 
   const handleStoreChangeInCreate = (storeId: string) => {
     setNewStoreId(storeId);
@@ -564,7 +635,12 @@ export function ListingsPage() {
 
       {createOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/40 p-4">
-          <div className="w-full max-w-lg rounded-xl border border-gray-200 bg-white p-5 shadow-xl">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="新建上架链接"
+            className="w-full max-w-lg rounded-xl border border-gray-200 bg-white p-5 shadow-xl"
+          >
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-base font-semibold text-gray-900">新建上架链接</h2>
               <button
@@ -709,7 +785,12 @@ export function ListingsPage() {
 
       {dupTarget && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/40 p-4">
-          <div className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-5 shadow-xl">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="复制上架链接为独立草稿"
+            className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-5 shadow-xl"
+          >
             <div className="mb-3 flex items-center justify-between">
               <h2 className="text-base font-semibold text-gray-900">复制上架链接为独立草稿</h2>
               <button

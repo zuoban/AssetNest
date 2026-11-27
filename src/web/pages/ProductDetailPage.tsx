@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   AlertCircle,
   ArrowLeft,
@@ -38,6 +38,7 @@ import { BatchAssetUpload, type PreparedUploadOptions } from "../components/Batc
 import { ConfirmDialog, type ConfirmDialogState } from "../components/ConfirmDialog";
 import { ProductCostFields } from "../components/ProductCostFields";
 import { parseProductCostDraft, productCostKeys, toProductCostDraft } from "../utils/productCosts";
+import { recordRecentVisit } from "../utils/commandPalette";
 import {
   formatAspectRatio,
   formatBytes,
@@ -59,9 +60,19 @@ interface AttrRow {
   value: string;
 }
 
+type ProductDetailTab = "overview" | "skus" | "assets" | "listings";
+
+function parseProductTab(raw: string | null): ProductDetailTab {
+  if (raw === "skus" || raw === "assets" || raw === "listings") {
+    return raw;
+  }
+  return "overview";
+}
+
 export function ProductDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
 
   const [product, setProduct] = useState<ProductDetail | null>(null);
   const [assets, setAssets] = useState<AssetListItem[]>([]);
@@ -71,7 +82,7 @@ export function ProductDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
-  const [tab, setTab] = useState<"overview" | "skus" | "assets" | "listings">("overview");
+  const [tab, setTab] = useState<ProductDetailTab>(() => parseProductTab(searchParams.get("tab")));
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null);
   const [confirmBusy, setConfirmBusy] = useState(false);
 
@@ -178,6 +189,12 @@ export function ProductDetailPage() {
       ]);
       setProduct(detail);
       syncFormFromProduct(detail);
+      recordRecentVisit({
+        kind: "product",
+        title: detail.nameZh,
+        subtitle: detail.spu,
+        to: `/products/${detail.id}`
+      });
       setAssets(assetRes.items);
       setMasterImages(masterRes.items);
       setListings(listingRes.items);
@@ -199,6 +216,24 @@ export function ProductDetailPage() {
   useEffect(() => {
     void loadAll();
   }, [loadAll]);
+
+  useEffect(() => {
+    setTab(parseProductTab(searchParams.get("tab")));
+  }, [searchParams]);
+
+  const handleTabChange = useCallback(
+    (nextTab: ProductDetailTab) => {
+      setTab(nextTab);
+      const nextParams = new URLSearchParams(searchParams);
+      if (nextTab === "overview") {
+        nextParams.delete("tab");
+      } else {
+        nextParams.set("tab", nextTab);
+      }
+      setSearchParams(nextParams, { replace: true });
+    },
+    [searchParams, setSearchParams]
+  );
 
   useEffect(() => {
     if (!compareOpen || !compareAssetId) {
@@ -648,7 +683,7 @@ export function ProductDetailPage() {
           <button
             key={item.key}
             type="button"
-            onClick={() => setTab(item.key)}
+            onClick={() => handleTabChange(item.key)}
             className={`border-b-2 px-4 py-2.5 text-xs font-medium transition-colors ${
               tab === item.key
                 ? "border-blue-600 text-blue-600"

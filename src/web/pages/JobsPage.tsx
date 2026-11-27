@@ -11,6 +11,11 @@ export function JobsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const initialTab = searchParams.get("tab") === "activities" ? "activities" : "jobs";
   const [tab, setTab] = useState<"jobs" | "activities">(initialTab);
+
+  useEffect(() => {
+    const nextTab = searchParams.get("tab") === "activities" ? "activities" : "jobs";
+    setTab(nextTab);
+  }, [searchParams]);
   const [jobs, setJobs] = useState<JobRecord[]>([]);
   const [activities, setActivities] = useState<ActivityRecord[]>([]);
   const [loading, setLoading] = useState(true);

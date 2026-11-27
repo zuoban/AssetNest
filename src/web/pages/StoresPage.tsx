@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Link } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import {
   Archive,
   BookOpen,
@@ -32,7 +32,10 @@ const DICT_CATEGORY_META: Record<DictionaryCategory, { title: string; placeholde
 };
 
 export function StoresPage() {
-  const [tab, setTab] = useState<PageTab>("stores");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [tab, setTab] = useState<PageTab>(() =>
+    searchParams.get("tab") === "dictionaries" ? "dictionaries" : "stores"
+  );
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
@@ -43,7 +46,7 @@ export function StoresPage() {
   const [dictionaries, setDictionaries] = useState<DictionariesResponse | null>(null);
 
   // Store filters
-  const [q, setQ] = useState("");
+  const [q, setQ] = useState(searchParams.get("q") ?? "");
   const [platformFilter, setPlatformFilter] = useState("");
   const [marketFilter, setMarketFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState<"" | StoreStatus>("");
@@ -102,7 +105,7 @@ export function StoresPage() {
     return found ? found.label : code;
   };
 
-  const openCreateModal = () => {
+  const openCreateModal = useCallback(() => {
     setEditingStore(null);
     setStoreName("");
     setStorePlatform(dictionaries?.platforms.find((d) => d.isActive)?.code ?? "shopee");
@@ -111,7 +114,49 @@ export function StoresPage() {
     setStoreStatus("active");
     setStoreNotes("");
     setModalOpen(true);
-  };
+  }, [dictionaries]);
+
+  const handleTabChange = useCallback(
+    (nextTab: PageTab) => {
+      setTab(nextTab);
+      const nextParams = new URLSearchParams(searchParams);
+      if (nextTab === "dictionaries") {
+        nextParams.set("tab", "dictionaries");
+      } else {
+        nextParams.delete("tab");
+      }
+      setSearchParams(nextParams, { replace: true });
+    },
+    [searchParams, setSearchParams]
+  );
+
+  useEffect(() => {
+    const urlTab = searchParams.get("tab");
+    setTab(urlTab === "dictionaries" ? "dictionaries" : "stores");
+
+    if (searchParams.has("q")) {
+      setQ(searchParams.get("q") ?? "");
+    }
+
+    if (searchParams.get("action") === "new") {
+      setTab("stores");
+      openCreateModal();
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.delete("action");
+      setSearchParams(nextParams, { replace: true });
+    }
+  }, [searchParams, setSearchParams, openCreateModal]);
+
+  useEffect(() => {
+    if (!modalOpen || savingStore) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setModalOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [modalOpen, savingStore]);
 
   const openEditModal = (store: StoreRecord) => {
     setEditingStore(store);
@@ -283,7 +328,7 @@ export function StoresPage() {
       <div className="flex items-center gap-2 border-b border-gray-200">
         <button
           type="button"
-          onClick={() => setTab("stores")}
+          onClick={() => handleTabChange("stores")}
           className={`inline-flex items-center gap-1.5 border-b-2 px-3 py-2 text-sm font-medium transition-colors ${
             tab === "stores"
               ? "border-blue-600 text-blue-700"
@@ -295,7 +340,7 @@ export function StoresPage() {
         </button>
         <button
           type="button"
-          onClick={() => setTab("dictionaries")}
+          onClick={() => handleTabChange("dictionaries")}
           className={`inline-flex items-center gap-1.5 border-b-2 px-3 py-2 text-sm font-medium transition-colors ${
             tab === "dictionaries"
               ? "border-blue-600 text-blue-700"
@@ -592,7 +637,12 @@ export function StoresPage() {
 
       {modalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/40 p-4">
-          <div className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-5 shadow-xl">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={editingStore ? "编辑店铺" : "新建店铺"}
+            className="w-full max-w-md rounded-xl border border-gray-200 bg-white p-5 shadow-xl"
+          >
             <div className="mb-4 flex items-center justify-between">
               <h2 className="text-base font-semibold text-gray-900">
                 {editingStore ? "编辑店铺" : "新建店铺"}

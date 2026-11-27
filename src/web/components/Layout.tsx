@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState, type ReactNode } from "react";
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Link, NavLink, useLocation } from "react-router-dom";
 import {
   Activity,
@@ -13,6 +13,7 @@ import {
   LogOut,
   Menu,
   Package,
+  Search,
   Settings,
   ShieldCheck,
   Sliders,
@@ -22,6 +23,8 @@ import {
 } from "lucide-react";
 import type { AuthMeResponse, StorageProviderSummary } from "../../shared/types";
 import { api } from "../api/client";
+import { isMacPlatform } from "../utils/commandPalette";
+import { CommandPalette } from "./CommandPalette";
 
 interface LayoutProps {
   auth: AuthMeResponse;
@@ -60,7 +63,9 @@ function resolvePageSection(pathname: string): { title: string; wide: boolean } 
 
 export function Layout({ auth, onLogout, children }: LayoutProps) {
   const location = useLocation();
+  const isMac = useMemo(() => isMacPlatform(), []);
   const [drawerOpen, setDrawerOpen] = useState(false);
+  const [paletteOpen, setPaletteOpen] = useState(false);
   const [loggingOut, setLoggingOut] = useState(false);
   const [offlineStorages, setOfflineStorages] = useState<StorageProviderSummary[]>([]);
   const [runningJobs, setRunningJobs] = useState(0);
@@ -86,6 +91,24 @@ export function Layout({ auth, onLogout, children }: LayoutProps) {
   }, [location.pathname, refreshSystemSignals]);
 
   const pageMeta = resolvePageSection(location.pathname);
+
+  useEffect(() => {
+    document.title = `${pageMeta.title} · ${auth.appName}`;
+  }, [pageMeta.title, auth.appName]);
+
+  useEffect(() => {
+    if (!drawerOpen) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setDrawerOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [drawerOpen]);
+
+  const openPalette = useCallback(() => setPaletteOpen(true), []);
+  const closePalette = useCallback(() => setPaletteOpen(false), []);
 
   const handleLogout = async () => {
     setLoggingOut(true);
@@ -207,6 +230,19 @@ export function Layout({ auth, onLogout, children }: LayoutProps) {
             <span className="truncate text-sm font-medium text-gray-800">{pageMeta.title}</span>
           </div>
           <div className="flex shrink-0 items-center gap-2.5">
+            <button
+              type="button"
+              onClick={openPalette}
+              title={`快速跳转 (${isMac ? "⌘K" : "Ctrl+K"})`}
+              aria-label="打开快速跳转命令面板"
+              className="group inline-flex items-center gap-2 rounded-lg border border-gray-200 bg-gray-50/80 px-2.5 py-1.5 text-xs text-gray-500 transition-colors hover:border-gray-300 hover:bg-white hover:text-gray-800"
+            >
+              <Search className="h-3.5 w-3.5 shrink-0 text-gray-400 transition-colors group-hover:text-blue-600" />
+              <span className="hidden md:inline">快速跳转...</span>
+              <kbd className="font-mono-tabular hidden rounded border border-gray-200 bg-white px-1.5 py-0.5 text-[10px] font-medium text-gray-500 shadow-2xs sm:inline-block">
+                {isMac ? "⌘K" : "Ctrl K"}
+              </kbd>
+            </button>
             {offlineStorages.length > 0 && (
               <Link
                 to="/storage"
@@ -248,6 +284,8 @@ export function Layout({ auth, onLogout, children }: LayoutProps) {
           {children}
         </main>
       </div>
+
+      <CommandPalette open={paletteOpen} onOpen={openPalette} onClose={closePalette} />
     </div>
   );
 }

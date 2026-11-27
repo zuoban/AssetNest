@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useNavigate, useSearchParams } from "react-router-dom";
 import {
   AlertCircle,
   Grid,
@@ -25,12 +25,13 @@ interface DraftSpecRow {
 
 export function ProductsPage() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const [items, setItems] = useState<ProductSummary[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(searchParams.get("q") ?? "");
   const [statusFilter, setStatusFilter] = useState<ProductStatus | "">("");
   const [viewMode, setViewMode] = useState<"grid" | "table">("grid");
 
@@ -76,7 +77,7 @@ export function ProductsPage() {
     return () => window.clearTimeout(timer);
   }, [loadProducts]);
 
-  const resetForm = () => {
+  const resetForm = useCallback(() => {
     setSpu("");
     setNameZh("");
     setNameEn("");
@@ -89,7 +90,31 @@ export function ProductsPage() {
     setCostDraft(toProductCostDraft());
     setSpecs([{ specKey: "", specValue: "", unit: "" }]);
     setFormError(null);
-  };
+  }, []);
+
+  useEffect(() => {
+    if (searchParams.has("q")) {
+      setQuery(searchParams.get("q") ?? "");
+    }
+    if (searchParams.get("action") === "new") {
+      resetForm();
+      setModalOpen(true);
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.delete("action");
+      setSearchParams(nextParams, { replace: true });
+    }
+  }, [searchParams, setSearchParams, resetForm]);
+
+  useEffect(() => {
+    if (!modalOpen || creating) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setModalOpen(false);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [modalOpen, creating]);
 
   const handleCreate = async (event: FormEvent) => {
     event.preventDefault();
@@ -394,7 +419,12 @@ export function ProductsPage() {
 
       {modalOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xl">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="新建商品"
+            className="flex max-h-[90vh] w-full max-w-2xl flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xl"
+          >
             <div className="flex items-center justify-between border-b border-gray-200 px-5 py-3.5">
               <h2 className="text-sm font-semibold text-gray-900">新建商品</h2>
               <button

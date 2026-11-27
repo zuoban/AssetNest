@@ -71,6 +71,7 @@ import {
   formatDateTime,
   LISTING_STATUS_META
 } from "../utils/format";
+import { recordRecentVisit } from "../utils/commandPalette";
 
 const PICKER_PAGE_SIZE = 24;
 const ASSET_GROUP_LABELS: Record<AssetSetKind, string> = {
@@ -334,14 +335,30 @@ export function ListingWorkbenchPage() {
   return <ListingWorkbench key={id} id={id} />;
 }
 
+function parseWorkbenchTab(raw: string | null): WorkbenchTab | null {
+  if (raw === "assets" || raw === "skus" || raw === "pdp" || raw === "release") {
+    return raw;
+  }
+  return null;
+}
+
 function ListingWorkbench({ id }: { id?: string }) {
   const navigate = useNavigate();
-  const [searchParams] = useSearchParams();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const routeTab = parseWorkbenchTab(searchParams.get("tab"));
   const routeGroup = searchParams.get("assetGroup");
   const routeMissingSku = searchParams.get("missingSku") === "1";
 
-  const [activeTab, setActiveTab] = useState<WorkbenchTab>("assets");
-  const [activeSetKind, setActiveSetKind] = useState<AssetSetKind>("carousel");
+  const [activeTab, setActiveTab] = useState<WorkbenchTab>(() => {
+    if (routeTab && routeTab !== "assets") return routeTab;
+    return "assets";
+  });
+  const [activeSetKind, setActiveSetKind] = useState<AssetSetKind>(() => {
+    if (routeGroup === "carousel" || routeGroup === "detail" || routeGroup === "sku" || routeGroup === "video") {
+      return routeGroup;
+    }
+    return routeMissingSku ? "sku" : "carousel";
+  });
 
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -441,6 +458,12 @@ function ListingWorkbench({ id }: { id?: string }) {
         api.getDictionaries()
       ]);
       setListing(detailRes);
+      recordRecentVisit({
+        kind: "listing",
+        title: detailRes.displayName,
+        subtitle: `${detailRes.storeName} · ${detailRes.productSpu}`,
+        to: `/listings/${detailRes.id}`
+      });
       setAssetSets(setsRes);
       setPdp(pdpRes);
       setStores(storesRes.items);
@@ -493,12 +516,34 @@ function ListingWorkbench({ id }: { id?: string }) {
       ? routeGroup
       : routeMissingSku ? "sku" : null;
     setMissingSkuOnly(group === "sku" && routeMissingSku);
+    if (routeTab && routeTab !== "assets") {
+      setActiveTab(routeTab);
+      return;
+    }
     if (group) {
       setActiveTab("assets");
       setActiveSetKind(group);
       setFixTarget(null);
+      return;
     }
-  }, [routeGroup, routeMissingSku]);
+    if (routeTab === "assets") {
+      setActiveTab("assets");
+    }
+  }, [routeTab, routeGroup, routeMissingSku]);
+
+  const handleTabChange = useCallback(
+    (nextTab: WorkbenchTab) => {
+      setActiveTab(nextTab);
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.set("tab", nextTab);
+      if (nextTab !== "assets") {
+        nextParams.delete("assetGroup");
+        nextParams.delete("missingSku");
+      }
+      setSearchParams(nextParams, { replace: true });
+    },
+    [searchParams, setSearchParams]
+  );
 
   useEffect(() => {
     if (!fixTarget || activeTab !== "assets" || activeSetKind !== fixTarget.kind) return;
@@ -537,6 +582,13 @@ function ListingWorkbench({ id }: { id?: string }) {
     setFixTarget(target);
     if (target.kind === "detail" && target.assetVersionId) {
       setDetailPreviewId(assetSets?.sets.detail.items.find((item) => item.assetVersionId === target.assetVersionId)?.id ?? null);
+    }
+    if (searchParams.get("tab") && searchParams.get("tab") !== "assets") {
+      const nextParams = new URLSearchParams(searchParams);
+      nextParams.set("tab", "assets");
+      nextParams.delete("assetGroup");
+      nextParams.delete("missingSku");
+      setSearchParams(nextParams, { replace: true });
     }
   };
 
@@ -1292,7 +1344,7 @@ function ListingWorkbench({ id }: { id?: string }) {
       <div className="flex items-center gap-2 border-b border-gray-200">
         <button
           type="button"
-          onClick={() => setActiveTab("assets")}
+          onClick={() => handleTabChange("assets")}
           className={`inline-flex items-center gap-1.5 border-b-2 px-3.5 py-2 text-sm font-medium ${
             activeTab === "assets"
               ? "border-blue-600 text-blue-700"
@@ -1304,7 +1356,7 @@ function ListingWorkbench({ id }: { id?: string }) {
         </button>
         <button
           type="button"
-          onClick={() => setActiveTab("skus")}
+          onClick={() => handleTabChange("skus")}
           className={`inline-flex items-center gap-1.5 border-b-2 px-3.5 py-2 text-sm font-medium ${
             activeTab === "skus"
               ? "border-blue-600 text-blue-700"
@@ -1316,7 +1368,7 @@ function ListingWorkbench({ id }: { id?: string }) {
         </button>
         <button
           type="button"
-          onClick={() => setActiveTab("pdp")}
+          onClick={() => handleTabChange("pdp")}
           className={`inline-flex items-center gap-1.5 border-b-2 px-3.5 py-2 text-sm font-medium ${
             activeTab === "pdp"
               ? "border-blue-600 text-blue-700"
@@ -1328,7 +1380,7 @@ function ListingWorkbench({ id }: { id?: string }) {
         </button>
         <button
           type="button"
-          onClick={() => setActiveTab("release")}
+          onClick={() => handleTabChange("release")}
           className={`inline-flex items-center gap-1.5 border-b-2 px-3.5 py-2 text-sm font-medium ${
             activeTab === "release"
               ? "border-blue-600 text-blue-700"
@@ -1562,7 +1614,7 @@ function ListingWorkbench({ id }: { id?: string }) {
                 <button
                   type="button"
                   disabled={savingSet || savingSkus}
-                  onClick={() => setActiveTab("skus")}
+                  onClick={() => handleTabChange("skus")}
                   className="ml-auto rounded-md px-2.5 py-1 text-gray-700 hover:bg-gray-100 disabled:opacity-50"
                 >
                   管理上架 SKU
