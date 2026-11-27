@@ -101,7 +101,13 @@ const LISTING_SUMMARY_SELECT = `
     (SELECT COUNT(*) FROM listing_skus ls WHERE ls.listing_id = l.id) AS sku_count,
     (SELECT COUNT(*) FROM asset_set_items asi JOIN asset_sets aset ON aset.id = asi.set_id WHERE aset.listing_id = l.id AND aset.kind = 'carousel') AS carousel_count,
     (SELECT COUNT(*) FROM asset_set_items asi JOIN asset_sets aset ON aset.id = asi.set_id WHERE aset.listing_id = l.id AND aset.kind = 'detail') AS detail_count,
-    (SELECT COUNT(*) FROM asset_set_items asi JOIN asset_sets aset ON aset.id = asi.set_id WHERE aset.listing_id = l.id AND aset.kind = 'sku') AS sku_image_count,
+    (SELECT COUNT(DISTINCT asi.listing_sku_id)
+       FROM asset_set_items asi
+       JOIN asset_sets aset ON aset.id = asi.set_id
+       JOIN asset_versions av ON av.id = asi.asset_version_id
+       JOIN assets a ON a.id = av.asset_id
+       WHERE aset.listing_id = l.id AND aset.kind = 'sku' AND a.asset_type = 'image' AND a.deleted_at IS NULL
+    ) AS sku_image_count,
     (SELECT COUNT(*) FROM asset_set_items asi JOIN asset_sets aset ON aset.id = asi.set_id WHERE aset.listing_id = l.id AND aset.kind = 'video') AS video_count,
     (SELECT COUNT(*) FROM pdp_versions pv WHERE pv.listing_id = l.id) AS pdp_version_count,
     d.content_json AS pdp_content_json

@@ -41,7 +41,6 @@ import type {
   ReleaseDetail,
   ReleaseSummary,
   RestoreBackupResult,
-  ReviewStatus,
   SkuRecord,
   SkuStatus,
   StorageCleanupItem,
@@ -406,14 +405,21 @@ export const api = {
       body: JSON.stringify(payload)
     });
   },
-  updateFolder(id: string, payload: { name?: string; parentId?: string | null }): Promise<FolderRecord> {
+  updateFolder(
+    id: string,
+    payload: { name?: string; parentId?: string | null; position?: number }
+  ): Promise<FolderRecord> {
     return requestJson(`/api/v1/folders/${id}`, {
       method: "PATCH",
       body: JSON.stringify(payload)
     });
   },
-  deleteFolder(id: string): Promise<{ deleted: boolean; id: string }> {
-    return requestJson(`/api/v1/folders/${id}`, {
+  deleteFolder(
+    id: string,
+    options?: { recursive?: boolean }
+  ): Promise<{ deleted: boolean; id: string; deletedIds?: string[] }> {
+    const qs = options?.recursive ? "?recursive=1" : "";
+    return requestJson(`/api/v1/folders/${id}${qs}`, {
       method: "DELETE"
     });
   },
@@ -442,8 +448,8 @@ export const api = {
     color?: string;
     tagId?: string;
     type?: AssetType;
-    reviewStatus?: ReviewStatus;
     folderId?: string;
+    includeSubfolders?: boolean;
     unfiled?: boolean;
     favorite?: boolean;
     storageId?: string;
@@ -463,8 +469,8 @@ export const api = {
     if (params.color) qs.set("color", params.color);
     if (params.tagId) qs.set("tagId", params.tagId);
     if (params.type) qs.set("type", params.type);
-    if (params.reviewStatus) qs.set("reviewStatus", params.reviewStatus);
     if (params.folderId) qs.set("folderId", params.folderId);
+    if (params.includeSubfolders === false) qs.set("includeSubfolders", "0");
     if (params.unfiled) qs.set("unfiled", "1");
     if (params.favorite) qs.set("favorite", "1");
     if (params.storageId) qs.set("storageId", params.storageId);
@@ -505,13 +511,10 @@ export const api = {
       | "remove_tags"
       | "link_products"
       | "unlink_products"
-      | "set_review_status"
       | "soft_delete";
     folderId?: string | null;
     tagIds?: string[];
     productIds?: string[];
-    reviewStatus?: ReviewStatus;
-    reviewNote?: string;
   }): Promise<{ affectedCount: number }> {
     return requestJson("/api/v1/assets/batch", {
       method: "POST",
@@ -606,15 +609,6 @@ export const api = {
     return requestJson(`/api/v1/assets/${encodeURIComponent(assetId)}/current-version`, {
       method: "POST",
       body: JSON.stringify({ versionId })
-    });
-  },
-  reviewAssetVersion(
-    versionId: string,
-    payload: { reviewStatus: ReviewStatus; reviewNote?: string }
-  ): Promise<AssetVersionRecord> {
-    return requestJson(`/api/v1/asset-versions/${encodeURIComponent(versionId)}/review`, {
-      method: "POST",
-      body: JSON.stringify(payload)
     });
   },
   listProductMasterImages(
@@ -966,11 +960,12 @@ export const api = {
   replaceListingAssetSet(
     id: string,
     kind: AssetSetKind,
-    items: Array<{ assetVersionId: string; listingSkuId?: string | null }>
+    items: Array<{ assetVersionId: string; listingSkuId?: string | null }>,
+    expectedItemIds?: string[]
   ): Promise<ListingAssetSetsResponse> {
     return requestJson(`/api/v1/listings/${encodeURIComponent(id)}/asset-sets/${kind}`, {
       method: "PUT",
-      body: JSON.stringify({ items })
+      body: JSON.stringify({ items, expectedItemIds })
     });
   },
   getListingPdp(id: string): Promise<ListingPdpResponse> {

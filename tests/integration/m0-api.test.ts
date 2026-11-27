@@ -69,7 +69,6 @@ describe("M0 API end-to-end foundation", () => {
     expect(dashRes.json().counts).toEqual({
       products: 0,
       assets: 0,
-      pendingReviews: 0,
       draftListings: 0,
       runningJobs: 0,
       failedJobs: 0

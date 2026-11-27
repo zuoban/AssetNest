@@ -149,7 +149,6 @@ export interface DashboardResponse {
   counts: {
     products: number;
     assets: number;
-    pendingReviews: number;
     draftListings: number;
     runningJobs: number;
     failedJobs: number;
@@ -175,7 +174,6 @@ export interface PaginatedResponse<T> {
 }
 
 export type AssetType = "image" | "video" | "document" | "archive" | "other";
-export type ReviewStatus = "pending" | "approved" | "rejected";
 export type ThumbStatus = "pending" | "ready" | "unsupported" | "failed";
 export type TagDimension = "market" | "platform" | "purpose" | "color" | "scene" | "custom";
 export type ProductStatus = "draft" | "active" | "archived";
@@ -268,9 +266,6 @@ export interface AssetVersionRecord {
   changeNote: string;
   promptText: string;
   referenceAssetVersionId: string | null;
-  reviewStatus: ReviewStatus;
-  reviewNote: string;
-  reviewedAt: string | null;
   thumbStatus: ThumbStatus;
   storageId: string;
   storageStatus: StorageProviderStatus;
@@ -308,7 +303,6 @@ export interface AssetListItem {
   folderName: string | null;
   currentVersionId: string;
   versionNo: number;
-  reviewStatus: ReviewStatus;
   thumbStatus: ThumbStatus;
   isFavorite: boolean;
   source: string;
@@ -329,8 +323,24 @@ export interface AssetListItem {
   updatedAt: string;
 }
 
+export interface AssetListingUsage {
+  itemId: string;
+  listingId: string;
+  listingName: string;
+  storeId: string;
+  storeName: string;
+  kind: AssetSetKind;
+  position: number;
+  assetVersionId: string;
+  versionNo: number;
+  listingSkuId: string | null;
+  skuCode: string | null;
+  skuChannelCode: string | null;
+}
+
 export interface AssetDetail extends AssetListItem {
   versions: AssetVersionRecord[];
+  listingUsages: AssetListingUsage[];
 }
 
 export interface TrashAssetItem {
@@ -486,7 +496,6 @@ export interface ProductMasterImageRecord {
   lockedAt: string;
   unlockedAt: string | null;
   unlockNote: string | null;
-  reviewStatus: ReviewStatus;
   thumbStatus: ThumbStatus;
   storageId: string;
   storageStatus: StorageProviderStatus;
@@ -575,8 +584,6 @@ export interface AssetSetItemRecord {
   latestVersionId: string;
   latestVersionNo: number;
   hasNewerVersion: boolean;
-  reviewStatus: ReviewStatus;
-  reviewNote: string;
   thumbStatus: ThumbStatus;
   storageId: string;
   storageStatus: StorageProviderStatus;
@@ -722,9 +729,6 @@ export interface ExportTemplateRules {
   pdp: {
     maxTitleCodePoints: number;
     requiredFields: PdpRequiredField[];
-  };
-  review: {
-    requireApprovedForFormal: boolean;
   };
   naming: {
     carouselPrefix: string;

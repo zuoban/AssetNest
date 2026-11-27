@@ -33,13 +33,6 @@ export function DashboardPage() {
     ? [
         { label: "商品档案", value: data.counts.products, hint: "未软删除商品数", to: "/products" },
         { label: "数字素材", value: data.counts.assets, hint: "未软删除素材数", to: "/assets" },
-        {
-          label: "待审核版本",
-          value: data.counts.pendingReviews,
-          hint: "点击直达待审核队列",
-          to: "/assets?reviewStatus=pending",
-          highlight: data.counts.pendingReviews > 0 ? "amber" : undefined
-        },
         { label: "上架草稿", value: data.counts.draftListings, hint: "草稿状态 Listing", to: "/listings?status=draft" },
         { label: "执行中任务", value: data.counts.runningJobs, hint: "排队与运行中", to: "/jobs" },
         {
@@ -102,7 +95,7 @@ export function DashboardPage() {
         </div>
       )}
 
-      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-6">
+      <div className="grid grid-cols-2 gap-3 md:grid-cols-3 lg:grid-cols-5">
         {stats.map((card) => {
           const content = (
             <>
@@ -114,11 +107,7 @@ export function DashboardPage() {
               </div>
               <div
                 className={`font-mono-tabular mt-1.5 text-2xl font-semibold ${
-                  card.highlight === "rose"
-                    ? "text-rose-600"
-                    : card.highlight === "amber"
-                      ? "text-amber-600"
-                      : "text-gray-900"
+                  card.highlight === "rose" ? "text-rose-600" : "text-gray-900"
                 }`}
               >
                 {card.value}

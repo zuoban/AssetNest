@@ -201,13 +201,17 @@ export async function validateListingForRelease(
     }
   ) => {
     const label = `${item.assetName} (v${item.versionNo})`;
+    const target = {
+      targetKind: item.kind,
+      targetId: item.assetVersionId,
+      ...(item.listingSkuId ? { details: { listingSkuId: item.listingSkuId } } : {})
+    };
 
     if (item.assetDeleted) {
       blockers.push({
         severity: "blocker",
         code: "ASSET_DELETED",
-        targetKind: item.kind,
-        targetId: item.assetVersionId,
+        ...target,
         message: `素材「${label}」已被移入回收站，请恢复或替换后再发布`
       });
     }
@@ -217,8 +221,7 @@ export async function validateListingForRelease(
       blockers.push({
         severity: "blocker",
         code: "FILE_MISSING",
-        targetKind: item.kind,
-        targetId: item.assetVersionId,
+        ...target,
         message: `素材「${label}」缺少底层物理文件记录`
       });
     } else {
@@ -227,37 +230,10 @@ export async function validateListingForRelease(
         blockers.push({
           severity: "blocker",
           code: check.code ?? "STORAGE_READ_FAILED",
+          ...target,
           targetKind: "storage",
-          targetId: item.assetVersionId,
+          details: { ...target.details, assetGroup: item.kind },
           message: `素材「${label}」不可读取：${check.message}`
-        });
-      }
-    }
-
-    if (item.reviewStatus === "rejected") {
-      blockers.push({
-        severity: "blocker",
-        code: "REVIEW_REJECTED",
-        targetKind: item.kind,
-        targetId: item.assetVersionId,
-        message: `素材「${label}」审核状态为「已拒绝」，禁止用于正式上架包`
-      });
-    } else if (item.reviewStatus === "pending") {
-      if (rules.review.requireApprovedForFormal) {
-        blockers.push({
-          severity: "blocker",
-          code: "REVIEW_PENDING",
-          targetKind: item.kind,
-          targetId: item.assetVersionId,
-          message: `素材「${label}」尚未通过审核（当前待审核），模板要求正式发布前必须全部审核通过`
-        });
-      } else {
-        warnings.push({
-          severity: "warning",
-          code: "REVIEW_PENDING_WARNING",
-          targetKind: item.kind,
-          targetId: item.assetVersionId,
-          message: `素材「${label}」目前为待审核状态`
         });
       }
     }
@@ -267,8 +243,7 @@ export async function validateListingForRelease(
       blockers.push({
         severity: "blocker",
         code: "DISALLOWED_EXTENSION",
-        targetKind: item.kind,
-        targetId: item.assetVersionId,
+        ...target,
         message: `素材「${label}」格式 .${normalizedExt || "unknown"} 不在模板允许列表（${opts.allowedExts.join(", ")}）内`
       });
     }
@@ -278,8 +253,7 @@ export async function validateListingForRelease(
       blockers.push({
         severity: "blocker",
         code: "FILE_TOO_LARGE",
-        targetKind: item.kind,
-        targetId: item.assetVersionId,
+        ...target,
         message: `素材「${label}」体积 ${(item.sizeBytes / (1024 * 1024)).toFixed(2)} MB 超出模板上限 ${opts.maxFileSizeMB} MB`
       });
     }
@@ -296,8 +270,7 @@ export async function validateListingForRelease(
           warnings.push({
             severity: "warning",
             code: "RESOLUTION_BELOW_MIN",
-            targetKind: item.kind,
-            targetId: item.assetVersionId,
+            ...target,
             message: `素材「${label}」分辨率 ${item.width}×${item.height} 低于模板建议最小尺寸 ${opts.minWidth ?? 0}×${opts.minHeight ?? 0}`
           });
         }
@@ -314,8 +287,7 @@ export async function validateListingForRelease(
           warnings.push({
             severity: "warning",
             code: "ASPECT_RATIO_MISMATCH",
-            targetKind: item.kind,
-            targetId: item.assetVersionId,
+            ...target,
             message: `素材「${label}」宽高比 (${item.width}×${item.height}) 超出模板目标 ${opts.aspectRatio}（±${Math.round(tolerance * 100)}%）范围`
           });
         }
@@ -326,8 +298,7 @@ export async function validateListingForRelease(
       warnings.push({
         severity: "warning",
         code: "NEWER_VERSION_AVAILABLE",
-        targetKind: item.kind,
-        targetId: item.assetVersionId,
+        ...target,
         message: `素材「${label}」存在更新版本 v${item.latestVersionNo}（系统不会自动替换，可按需手动升级）`
       });
     }
@@ -336,8 +307,7 @@ export async function validateListingForRelease(
       warnings.push({
         severity: "warning",
         code: "DUPLICATE_ASSET",
-        targetKind: item.kind,
-        targetId: item.assetVersionId,
+        ...target,
         message: `素材「${label}」在当前 ${item.kind} 集合中存在重复引用`
       });
     }

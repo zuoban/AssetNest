@@ -97,9 +97,8 @@ export function rebuildAssetSearchDocument(db: AppDatabase, assetId: string): vo
   const asset = db.raw
     .prepare(
       `SELECT a.id, a.name, a.original_filename, a.purpose, a.source, a.notes, a.deleted_at,
-              f.name AS folder_name
+              a.folder_id
        FROM assets a
-       LEFT JOIN folders f ON f.id = a.folder_id
        WHERE a.id = ?`
     )
     .get(assetId) as
@@ -111,7 +110,7 @@ export function rebuildAssetSearchDocument(db: AppDatabase, assetId: string): vo
         source: string;
         notes: string;
         deleted_at: string | null;
-        folder_name: string | null;
+        folder_id: string | null;
       }
     | undefined;
 
@@ -120,13 +119,27 @@ export function rebuildAssetSearchDocument(db: AppDatabase, assetId: string): vo
     return;
   }
 
+  const folderNames: string[] = [];
+  if (asset.folder_id) {
+    const visited = new Set<string>();
+    let cursor: string | null = asset.folder_id;
+    while (cursor && !visited.has(cursor)) {
+      visited.add(cursor);
+      const folderRow = db.raw
+        .prepare("SELECT name, parent_id FROM folders WHERE id = ?")
+        .get(cursor) as { name: string; parent_id: string | null } | undefined;
+      if (!folderRow) break;
+      folderNames.push(folderRow.name);
+      cursor = folderRow.parent_id;
+    }
+  }
+
   const versions = db.raw
-    .prepare("SELECT original_filename, change_note, prompt_text, review_note FROM asset_versions WHERE asset_id = ?")
+    .prepare("SELECT original_filename, change_note, prompt_text FROM asset_versions WHERE asset_id = ?")
     .all(assetId) as Array<{
     original_filename: string;
     change_note: string;
     prompt_text: string;
-    review_note: string;
   }>;
 
   const tags = db.raw
@@ -159,8 +172,8 @@ export function rebuildAssetSearchDocument(db: AppDatabase, assetId: string): vo
     asset.purpose,
     asset.source,
     asset.notes,
-    asset.folder_name ?? "",
-    ...versions.map((ver) => `${ver.original_filename} ${ver.change_note} ${ver.prompt_text} ${ver.review_note}`),
+    ...folderNames,
+    ...versions.map((ver) => `${ver.original_filename} ${ver.change_note} ${ver.prompt_text}`),
     ...tags.map((tag) => `${tag.dimension} ${tag.name}`),
     ...products.map((prod) => `${prod.spu} ${prod.name_zh} ${prod.name_en} ${prod.category} ${prod.brand_model}`)
   ];

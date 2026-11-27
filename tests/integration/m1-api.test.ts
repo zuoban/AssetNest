@@ -296,18 +296,20 @@ describe("M1 API integration (Products, SKUs, Assets, Deduplication, Search, Sec
     expect(upRes.statusCode).toBe(201);
     const asset = upRes.json().items[0];
 
-    // Approve review status
-    await runtime.app.inject({
+    const removedBatchAction = await runtime.app.inject({
       method: "POST",
       url: "/api/v1/assets/batch",
       headers: authHeaders,
       payload: { assetIds: [asset.id], action: "set_review_status", reviewStatus: "approved" }
     });
 
-    // Combined filter: product + market + platform + scene + reviewStatus
+    expect(removedBatchAction.statusCode).toBe(400);
+    expect(asset).not.toHaveProperty("reviewStatus");
+
+    // The combined filter still works when an older client sends the retired review filter.
     const comboRes = await runtime.app.inject({
       method: "GET",
-      url: `/api/v1/assets?productId=${prod.id}&market=TH&platform=Shopee&scene=${encodeURIComponent("居家")}&reviewStatus=approved`,
+      url: `/api/v1/assets?productId=${prod.id}&market=TH&platform=Shopee&scene=${encodeURIComponent("居家")}&reviewStatus=rejected`,
       headers: { cookie }
     });
     expect(comboRes.statusCode).toBe(200);

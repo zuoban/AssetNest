@@ -3,7 +3,8 @@ import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
 import { openDatabase } from "../../src/server/db/database.js";
-import { getCurrentSchemaVersion, runMigrations } from "../../src/server/db/migrator.js";
+import { getCurrentSchemaVersion, getDefaultMigrationsDir, runMigrations } from "../../src/server/db/migrator.js";
+import { upsertSearchDocument } from "../../src/server/modules/search/service.js";
 
 const tempDirs: string[] = [];
 
@@ -20,6 +21,46 @@ afterEach(() => {
 });
 
 describe("SQLite database & migrator", () => {
+  it("removes legacy review notes from search while preserving the original records", () => {
+    const dir = makeTempDir();
+    const previousMigrationsDir = path.join(dir, "previous-migrations");
+    fs.mkdirSync(previousMigrationsDir);
+    const migrationsDir = getDefaultMigrationsDir();
+    for (const file of fs.readdirSync(migrationsDir).filter((name) => /^000[1-6]_.*\.sql$/.test(name))) {
+      fs.copyFileSync(path.join(migrationsDir, file), path.join(previousMigrationsDir, file));
+    }
+    const db = openDatabase({ dbPath: path.join(dir, "assetnest.db"), wal: true, acquireInstanceLock: true });
+
+    try {
+      runMigrations(db, previousMigrationsDir);
+      db.raw.exec(`
+        INSERT INTO storage_providers (id, name, type, config_ref, created_at, updated_at)
+        VALUES ('local', 'Local', 'local', 'local', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+        INSERT INTO files (id, storage_id, object_key, sha256, size_bytes, mime_type, created_at, updated_at)
+        VALUES ('file', 'local', 'file.png', 'hash', 1, 'image/png', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+        INSERT INTO assets (id, name, original_filename, asset_type, created_at, updated_at)
+        VALUES ('asset', 'Blue bottle', 'file.png', 'image', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);
+        INSERT INTO asset_versions (
+          id, asset_id, file_id, version_no, original_filename, review_status, review_note, created_at
+        ) VALUES ('version', 'asset', 'file', 1, 'file.png', 'rejected', 'legacyreviewword', CURRENT_TIMESTAMP);
+      `);
+      upsertSearchDocument(db, "asset", "asset", "Blue bottle legacyreviewword");
+
+      runMigrations(db);
+
+      expect(db.raw.prepare("SELECT review_status, review_note FROM asset_versions WHERE id = 'version'").get())
+        .toEqual({ review_status: "rejected", review_note: "legacyreviewword" });
+      const document = db.raw.prepare("SELECT search_text FROM search_documents WHERE entity_id = 'asset'").get();
+      expect(document?.search_text).toContain("Blue bottle");
+      expect(document?.search_text).not.toContain("legacyreviewword");
+      const match = db.raw.prepare("SELECT entity_id FROM search_fts WHERE search_fts MATCH ?");
+      expect(match.all("legacyreviewword")).toEqual([]);
+      expect(match.all("bottle")).toEqual([{ entity_id: "asset" }]);
+    } finally {
+      db.close();
+    }
+  });
+
   it("enables WAL and foreign_keys, applies migrations idempotently, and blocks downgrades", () => {
     const dir = makeTempDir();
     const dbPath = path.join(dir, "assetnest.db");

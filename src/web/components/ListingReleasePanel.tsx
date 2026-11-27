@@ -16,21 +16,60 @@ import {
   ShieldCheck
 } from "lucide-react";
 import type {
+  AssetSetKind,
   ExportTemplateRecord,
   ListingDetail,
   ListingValidationResult,
   ReleaseDetail,
-  ReleaseSummary
+  ReleaseSummary,
+  ValidationIssue
 } from "../../shared/types";
 import { api, ApiClientError } from "../api/client";
 import { formatBytes, formatDateTime } from "../utils/format";
 import { formatValidationCode, VALIDATION_TARGET_LABELS } from "../utils/labels";
 
-interface ListingReleasePanelProps {
-  listing: ListingDetail;
+interface AssetFixTarget {
+  kind: AssetSetKind;
+  assetVersionId?: string;
+  listingSkuId?: string;
 }
 
-export function ListingReleasePanel({ listing }: ListingReleasePanelProps) {
+interface ListingReleasePanelProps {
+  listing: ListingDetail;
+  onFixAsset?: (target: AssetFixTarget) => void;
+}
+
+function getAssetFixTarget(issue: ValidationIssue): AssetFixTarget | null {
+  const kind = issue.targetKind === "storage" ? issue.details?.assetGroup : issue.targetKind;
+  if (kind !== "carousel" && kind !== "detail" && kind !== "sku" && kind !== "video") return null;
+
+  if (issue.code === "SKU_IMAGE_MISSING") {
+    return { kind, listingSkuId: issue.targetId ?? undefined };
+  }
+  const listingSkuId = issue.details?.listingSkuId;
+  return {
+    kind,
+    assetVersionId: issue.targetId ?? undefined,
+    listingSkuId: typeof listingSkuId === "string" ? listingSkuId : undefined
+  };
+}
+
+function FixAssetButton({ issue, onFixAsset }: { issue: ValidationIssue; onFixAsset?: ListingReleasePanelProps["onFixAsset"] }) {
+  const target = getAssetFixTarget(issue);
+  if (!target || !onFixAsset) return null;
+
+  return (
+    <button
+      type="button"
+      onClick={() => onFixAsset(target)}
+      className="ml-auto shrink-0 rounded px-1 font-medium text-blue-800 underline underline-offset-2 hover:bg-blue-50"
+    >
+      去修正
+    </button>
+  );
+}
+
+export function ListingReleasePanel({ listing, onFixAsset }: ListingReleasePanelProps) {
   const navigate = useNavigate();
 
   const [templates, setTemplates] = useState<ExportTemplateRecord[]>([]);
@@ -228,7 +267,7 @@ export function ListingReleasePanel({ listing }: ListingReleasePanelProps) {
               上架前规则预检与 Release 快照
             </h2>
             <p className="mt-0.5 text-xs text-gray-500">
-              逐一校验当前固定素材版本、存储对象可读性、审核状态、SKU 绑定与 PDP 必填字段
+              逐一校验当前固定素材版本、存储对象可读性、SKU 绑定与 PDP 必填字段
             </p>
           </div>
           <div className="flex flex-wrap items-center gap-2">
@@ -307,6 +346,7 @@ export function ListingReleasePanel({ listing }: ListingReleasePanelProps) {
                         </span>
                       )}
                       <span>{issue.message}</span>
+                      <FixAssetButton issue={issue} onFixAsset={onFixAsset} />
                     </li>
                   ))}
                 </ul>
@@ -334,6 +374,7 @@ export function ListingReleasePanel({ listing }: ListingReleasePanelProps) {
                         </span>
                       )}
                       <span>{issue.message}</span>
+                      <FixAssetButton issue={issue} onFixAsset={onFixAsset} />
                     </li>
                   ))}
                 </ul>

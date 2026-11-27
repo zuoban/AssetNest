@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type FormEvent } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import {
   AlertCircle,
@@ -17,7 +17,6 @@ import {
   Star,
   Trash2,
   Unlock,
-  Upload,
   X
 } from "lucide-react";
 import type {
@@ -28,26 +27,14 @@ import type {
   ProductDetail,
   ProductMasterImageRecord,
   ProductStatus,
-  ReviewStatus,
   SkuRecord,
   SkuStatus,
   StoreRecord
 } from "../../shared/types";
-import {
-  api,
-  ApiClientError,
-  type UploadTransferProgress
-} from "../api/client";
+import { api, ApiClientError } from "../api/client";
 import { AssetLightbox } from "../components/AssetLightbox";
+import { BatchAssetUpload, type PreparedUploadOptions } from "../components/BatchAssetUpload";
 import { ConfirmDialog, type ConfirmDialogState } from "../components/ConfirmDialog";
-import { FileDropButton } from "../components/FileDropButton";
-import { ImageCompressionSwitch } from "../components/ImageCompressionSwitch";
-import {
-  CompressionProgressPanel,
-  PreparedUploadList,
-  UploadTransferProgressPanel
-} from "../components/UploadProgressBar";
-import { usePreparedUploadFiles } from "../hooks/usePreparedUploadFiles";
 import {
   formatAspectRatio,
   formatBytes,
@@ -55,8 +42,7 @@ import {
   formatUploadCompression,
   LISTING_STATUS_META,
   MASTER_ANGLE_OPTIONS,
-  PRODUCT_STATUS_META,
-  REVIEW_STATUS_META
+  PRODUCT_STATUS_META
 } from "../utils/format";
 
 interface SpecRow {
@@ -73,7 +59,6 @@ interface AttrRow {
 export function ProductDetailPage() {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const uploadInFlight = useRef(false);
 
   const [product, setProduct] = useState<ProductDetail | null>(null);
   const [assets, setAssets] = useState<AssetListItem[]>([]);
@@ -84,6 +69,7 @@ export function ProductDetailPage() {
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [tab, setTab] = useState<"overview" | "skus" | "assets" | "listings">("overview");
+  const [assetsTabOpened, setAssetsTabOpened] = useState(false);
   const [confirmDialog, setConfirmDialog] = useState<ConfirmDialogState | null>(null);
   const [confirmBusy, setConfirmBusy] = useState(false);
 
@@ -116,10 +102,7 @@ export function ProductDetailPage() {
   const [skuError, setSkuError] = useState<string | null>(null);
 
   // Asset upload & lightbox
-  const [uploading, setUploading] = useState(false);
   const [compressUploadImages, setCompressUploadImages] = useState(true);
-  const uploadPrep = usePreparedUploadFiles(compressUploadImages);
-  const [uploadProgress, setUploadProgress] = useState<UploadTransferProgress | null>(null);
   const [lightboxIndex, setLightboxIndex] = useState<number | null>(null);
 
   // Master image lock / unlock modals
@@ -136,16 +119,13 @@ export function ProductDetailPage() {
   const [replacementLockNote, setReplacementLockNote] = useState("");
   const [unlockSubmitting, setUnlockSubmitting] = useState(false);
 
-  // Side-by-side master vs candidate review
+  // Side-by-side master image comparison
   const [compareOpen, setCompareOpen] = useState(false);
   const [selectedMasterId, setSelectedMasterId] = useState<string>("");
   const [compareAssetId, setCompareAssetId] = useState<string>("");
   const [compareAssetDetail, setCompareAssetDetail] = useState<AssetDetail | null>(null);
   const [compareVersionId, setCompareVersionId] = useState<string>("");
   const [compareLoading, setCompareLoading] = useState(false);
-  const [reviewNote, setReviewNote] = useState("");
-  const [reviewSubmitting, setReviewSubmitting] = useState(false);
-  const [manualChecks, setManualChecks] = useState<Record<string, boolean>>({});
 
   // Create listing modal
   const [createListingOpen, setCreateListingOpen] = useState(false);
@@ -216,11 +196,6 @@ export function ProductDetailPage() {
   }, [loadAll]);
 
   useEffect(() => {
-    uploadPrep.clear();
-    setUploadProgress(null);
-  }, [id, uploadPrep.clear]);
-
-  useEffect(() => {
     if (!compareOpen || !compareAssetId) {
       setCompareAssetDetail(null);
       setCompareVersionId("");
@@ -236,12 +211,10 @@ export function ProductDetailPage() {
         setCompareVersionId((prev) =>
           prev && detail.versions.some((v) => v.id === prev) ? prev : detail.currentVersionId
         );
-        const currentVer = detail.versions.find((v) => v.id === detail.currentVersionId);
-        setReviewNote(currentVer?.reviewNote ?? "");
       })
       .catch((err) => {
         if (!cancelled) {
-          setError(err instanceof Error ? err.message : "加载待审素材版本失败");
+          setError(err instanceof Error ? err.message : "加载对比素材版本失败");
         }
       })
       .finally(() => {
@@ -400,51 +373,17 @@ export function ProductDetailPage() {
     });
   };
 
-  const handleUploadLinkedAssets = async () => {
-    if (
-      !id ||
-      uploadPrep.items.length === 0 ||
-      uploadPrep.summary.isCompressing ||
-      uploadInFlight.current
-    ) {
-      return;
-    }
-    uploadInFlight.current = true;
-    setUploading(true);
-    const totalBytes = uploadPrep.preparedFiles.reduce((sum, item) => sum + item.upload.size, 0);
-    setUploadProgress({
-      loaded: 0,
-      total: totalBytes,
-      percent: 0,
-      phase: "uploading"
-    });
+  const handleUploadLinkedAssets = async (files: File[], options: PreparedUploadOptions) => {
+    if (!id) return;
     setError(null);
     setNotice(null);
-    try {
-      const res = await api.uploadAssets(
-        uploadPrep.items.map((item) => item.originalFile),
-        {
-          productId: id,
-          compressImages: compressUploadImages,
-          preparedFiles: uploadPrep.preparedFiles,
-          compressionSummary: uploadPrep.summary.compressionSummary,
-          onUploadProgress: (progress) => setUploadProgress(progress)
-        }
-      );
-      setNotice(
-        `已上传 ${res.uploadedCount} 个素材${
-          res.deduplicatedCount > 0 ? `（其中 ${res.deduplicatedCount} 个复用已有底层文件）` : ""
-        }${formatUploadCompression(res.compression)}`
-      );
-      uploadPrep.clear();
-      await loadAll();
-    } catch (err) {
-      setError(err instanceof ApiClientError ? err.message : "上传素材失败");
-    } finally {
-      uploadInFlight.current = false;
-      setUploading(false);
-      setUploadProgress(null);
-    }
+    const res = await api.uploadAssets(files, { ...options, productId: id });
+    setNotice(
+      `已上传 ${res.uploadedCount} 个素材${
+        res.deduplicatedCount > 0 ? `（其中 ${res.deduplicatedCount} 个复用已有底层文件）` : ""
+      }${formatUploadCompression(res.compression)}`
+    );
+    await loadAll();
   };
 
   const handleSetCover = async (asset: AssetListItem) => {
@@ -539,40 +478,9 @@ export function ProductDetailPage() {
   const openCompareWithAsset = (asset: AssetListItem) => {
     setCompareOpen(true);
     setCompareAssetId(asset.id);
-    setManualChecks({});
     const primary = masterImages.find((m) => m.isPrimary) ?? masterImages[0];
     if (primary && !selectedMasterId) {
       setSelectedMasterId(primary.id);
-    }
-  };
-
-  const handleCompareReview = async (nextStatus: ReviewStatus) => {
-    if (!compareVersionId || !compareAssetId) return;
-    setReviewSubmitting(true);
-    setError(null);
-    try {
-      const updated = await api.reviewAssetVersion(compareVersionId, {
-        reviewStatus: nextStatus,
-        reviewNote: reviewNote.trim()
-      });
-      setCompareAssetDetail((prev) =>
-        prev
-          ? {
-              ...prev,
-              reviewStatus:
-                prev.currentVersionId === updated.id ? updated.reviewStatus : prev.reviewStatus,
-              versions: prev.versions.map((v) => (v.id === updated.id ? updated : v))
-            }
-          : prev
-      );
-      setNotice(
-        `版本 V${updated.versionNo} 审核状态已更新为「${REVIEW_STATUS_META[updated.reviewStatus].label}」`
-      );
-      await loadAll();
-    } catch (err) {
-      setError(err instanceof ApiClientError ? err.message : "提交版本审核失败");
-    } finally {
-      setReviewSubmitting(false);
     }
   };
 
@@ -727,7 +635,10 @@ export function ProductDetailPage() {
           <button
             key={item.key}
             type="button"
-            onClick={() => setTab(item.key)}
+            onClick={() => {
+              if (item.key === "assets") setAssetsTabOpened(true);
+              setTab(item.key);
+            }}
             className={`border-b-2 px-4 py-2.5 text-xs font-medium transition-colors ${
               tab === item.key
                 ? "border-blue-600 text-blue-600"
@@ -922,7 +833,7 @@ export function ProductDetailPage() {
           <section className="rounded-xl border border-gray-200 bg-white p-5">
             <h2 className="mb-1 text-sm font-semibold text-gray-900">外观一致性约束</h2>
             <p className="mb-3.5 text-[11px] text-gray-500">
-              供设计与 AI 制图审核参考，明确不可变更的外观结构、比例与颜色要求
+              供设计与 AI 制图参考，明确不可变更的外观结构、比例与颜色要求
             </p>
             <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <div>
@@ -991,7 +902,7 @@ export function ProductDetailPage() {
                   onChange={(e) =>
                     setConstraints((prev) => ({ ...prev, referenceNotes: e.target.value }))
                   }
-                  placeholder="如：审核 AI 场景图时重点比对正面母图与侧面母图的握把弧度、杯口倒角与印字位置"
+                  placeholder="如：对比 AI 场景图时重点参考正面母图与侧面母图的握把弧度、杯口倒角与印字位置"
                   className="w-full rounded-lg border border-gray-200 px-3 py-2 focus:border-blue-500 focus:outline-none"
                 />
               </div>
@@ -1106,11 +1017,11 @@ export function ProductDetailPage() {
         </div>
       )}
 
-      {tab === "assets" && (
-        <div className="space-y-4">
+      {assetsTabOpened && (
+        <div hidden={tab !== "assets"} className="space-y-4">
           <div className="flex flex-wrap items-center justify-between gap-2">
             <p className="text-xs text-gray-500">
-              此处上传的素材将自动关联至当前商品（{product.spu}），支持设为封面图、锁定多视角母图以及与母图并排对比审核。
+              此处上传的素材将自动关联至当前商品（{product.spu}），支持设为封面图、锁定多视角母图以及与母图并排对比。
             </p>
             <div className="flex items-center gap-2">
               <button
@@ -1129,91 +1040,19 @@ export function ProductDetailPage() {
                 }`}
               >
                 <Columns className="h-3.5 w-3.5" />
-                <span>{compareOpen ? "收起并排对比审核" : "母图并排对比审核"}</span>
+                <span>{compareOpen ? "收起并排对比" : "母图并排对比"}</span>
               </button>
             </div>
           </div>
 
-          <div className="space-y-2.5 rounded-xl border border-gray-200 bg-white p-4 text-xs">
-            <ImageCompressionSwitch
-              checked={compressUploadImages}
-              onChange={setCompressUploadImages}
-              disabled={uploading}
-            />
-            <FileDropButton
-              multiple
-              disabled={uploading}
-              onFiles={(files) => {
-                if (uploadInFlight.current) return;
-                uploadPrep.addFiles(files);
-                setError(null);
-              }}
-              className="flex flex-col items-center justify-center px-4 py-6"
-            >
-              <Upload className="h-6 w-6 text-gray-400" />
-              <span className="mt-1.5 font-medium text-gray-700">拖入文件，或点击选择</span>
-              <span className="mt-0.5 text-[11px] text-gray-400">
-                支持多文件批量加入待上传队列，相同底层文件自动基于 SHA-256 去重
-              </span>
-            </FileDropButton>
-            {compressUploadImages && uploadPrep.summary.compressibleCount > 0 && (
-              <CompressionProgressPanel
-                completed={uploadPrep.summary.completedCount}
-                total={uploadPrep.summary.compressibleCount}
-                percent={uploadPrep.summary.percent}
-                isCompressing={uploadPrep.summary.isCompressing}
-                originalBytes={uploadPrep.summary.originalBytes}
-                compressedBytes={uploadPrep.summary.compressedBytes}
-                savedBytes={uploadPrep.summary.savedBytes}
-                savedPercent={uploadPrep.summary.savedPercent}
-                unchangedImages={uploadPrep.summary.unchangedImages}
-              />
-            )}
-            <PreparedUploadList
-              items={uploadPrep.items}
-              compressEnabled={compressUploadImages}
-              disabled={uploading}
-              onRemove={uploadPrep.removeFile}
-            />
-            {uploading && uploadProgress && (
-              <UploadTransferProgressPanel
-                progress={uploadProgress}
-                label="正在上传素材…"
-              />
-            )}
-            {uploadPrep.items.length > 0 && (
-              <div className="flex items-center justify-end gap-2 border-t border-gray-100 pt-3">
-                <button
-                  type="button"
-                  disabled={uploading}
-                  onClick={uploadPrep.clear}
-                  className="rounded-lg border border-gray-200 px-3.5 py-2 font-medium text-gray-700 hover:bg-gray-50 disabled:opacity-50"
-                >
-                  清空队列
-                </button>
-                <button
-                  type="button"
-                  disabled={
-                    uploading ||
-                    uploadPrep.items.length === 0 ||
-                    uploadPrep.summary.isCompressing
-                  }
-                  onClick={() => void handleUploadLinkedAssets()}
-                  className="rounded-lg bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-                >
-                  {uploadPrep.summary.isCompressing
-                    ? `正在压缩 (${uploadPrep.summary.completedCount}/${uploadPrep.summary.compressibleCount})…`
-                    : uploading
-                      ? uploadProgress?.phase === "processing"
-                        ? "服务器处理中…"
-                        : uploadProgress
-                          ? `上传中 ${uploadProgress.percent}%`
-                          : "上传中..."
-                      : `开始上传 (${uploadPrep.items.length})`}
-                </button>
-              </div>
-            )}
-          </div>
+          <BatchAssetUpload
+            key={id}
+            className="space-y-2.5 rounded-xl border border-gray-200 bg-white p-4 text-xs"
+            compression={{ checked: compressUploadImages, onChange: setCompressUploadImages }}
+            onFilesAdded={() => setError(null)}
+            onSubmit={handleUploadLinkedAssets}
+            onError={setError}
+          />
 
           {/* Locked Master Images Panel */}
           <section className="rounded-xl border border-gray-200 bg-white p-4">
@@ -1320,17 +1159,17 @@ export function ProductDetailPage() {
             )}
           </section>
 
-          {/* Side-by-Side Master vs Candidate Version Review */}
+          {/* Side-by-side master image comparison */}
           {compareOpen && (
             <section className="rounded-xl border border-blue-200 bg-white p-4 shadow-xs">
               <div className="mb-3 flex flex-wrap items-center justify-between gap-2 border-b border-gray-100 pb-3">
                 <div>
                   <h2 className="flex items-center gap-1.5 text-sm font-semibold text-gray-900">
                     <Columns className="h-4 w-4 text-blue-600" />
-                    <span>母图 vs 待审版本并排对比审核</span>
+                    <span>母图并排对比</span>
                   </h2>
                   <p className="mt-0.5 text-[11px] text-gray-500">
-                    用于人工对照外观一致性约束审核衍生图或新版本，每个版本独立保存审核状态与意见。
+                    选择锁定母图和商品图片版本，并排查看外观差异。
                   </p>
                 </div>
                 <button
@@ -1349,14 +1188,6 @@ export function ProductDetailPage() {
                   compareAssetDetail?.versions.find((v) => v.id === compareVersionId) ??
                   compareAssetDetail?.versions[0] ??
                   null;
-                const constraintItems = [
-                  { key: "structure", label: "关键结构", value: constraints.structure },
-                  { key: "proportion", label: "外观比例", value: constraints.proportion },
-                  { key: "color", label: "颜色与工艺", value: constraints.color },
-                  { key: "dimensions", label: "基准尺寸", value: constraints.dimensions },
-                  { key: "forbiddenChanges", label: "禁止变更项", value: constraints.forbiddenChanges },
-                  { key: "referenceNotes", label: "参考说明", value: constraints.referenceNotes }
-                ].filter((item) => item.value && item.value.trim().length > 0);
 
                 return (
                   <div className="space-y-4 text-xs">
@@ -1409,7 +1240,7 @@ export function ProductDetailPage() {
                       {/* Right: Candidate Asset & Version */}
                       <div className="flex flex-col rounded-xl border border-gray-200 bg-gray-50/50 p-3">
                         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
-                          <span className="font-semibold text-gray-900">待审素材与版本</span>
+                          <span className="font-semibold text-gray-900">对比素材与版本</span>
                           <div className="flex items-center gap-1.5">
                             <select
                               value={compareAssetId}
@@ -1426,17 +1257,12 @@ export function ProductDetailPage() {
                             {compareAssetDetail && (
                               <select
                                 value={compareVersionId}
-                                onChange={(e) => {
-                                  const nextVid = e.target.value;
-                                  setCompareVersionId(nextVid);
-                                  const ver = compareAssetDetail.versions.find((v) => v.id === nextVid);
-                                  setReviewNote(ver?.reviewNote ?? "");
-                                }}
+                                onChange={(e) => setCompareVersionId(e.target.value)}
                                 className="font-mono-tabular rounded-lg border border-gray-200 bg-white px-2 py-1 text-[11px] focus:border-blue-500 focus:outline-none"
                               >
                                 {compareAssetDetail.versions.map((v) => (
                                   <option key={v.id} value={v.id}>
-                                    V{v.versionNo} ({REVIEW_STATUS_META[v.reviewStatus].label})
+                                    V{v.versionNo}
                                   </option>
                                 ))}
                               </select>
@@ -1453,7 +1279,7 @@ export function ProductDetailPage() {
                               className="max-h-full max-w-full object-contain"
                             />
                           ) : (
-                            <p className="text-gray-400">请选择要审核的商品图片素材</p>
+                            <p className="text-gray-400">请选择要对比的商品图片素材</p>
                           )}
                         </div>
                         {selectedVersion && (
@@ -1466,13 +1292,6 @@ export function ProductDetailPage() {
                                   : "—"}{" "}
                                 · {formatBytes(selectedVersion.sizeBytes)}
                               </span>
-                              <span
-                                className={`rounded border px-1.5 py-0.5 text-[10px] font-medium ${
-                                  REVIEW_STATUS_META[selectedVersion.reviewStatus].className
-                                }`}
-                              >
-                                {REVIEW_STATUS_META[selectedVersion.reviewStatus].label}
-                              </span>
                             </div>
                             {selectedVersion.changeNote && (
                               <p className="text-gray-600">变更说明：{selectedVersion.changeNote}</p>
@@ -1484,89 +1303,6 @@ export function ProductDetailPage() {
                             )}
                           </div>
                         )}
-                      </div>
-                    </div>
-
-                    {/* Manual Appearance Checklist + Review Actions */}
-                    <div className="grid grid-cols-1 gap-4 rounded-xl border border-gray-200 bg-gray-50 p-3.5 lg:grid-cols-2">
-                      <div>
-                        <div className="mb-2 flex items-center justify-between">
-                          <span className="font-semibold text-gray-900">外观一致性人工核对清单</span>
-                          <span className="rounded bg-white px-1.5 py-0.5 text-[10px] text-gray-500">
-                            人工核对（非自动识别）
-                          </span>
-                        </div>
-                        {constraintItems.length === 0 ? (
-                          <p className="text-[11px] text-gray-500">
-                            暂未填写外观一致性约束，可在「基础信息与规格」中补充关键结构、比例与禁止变更项。
-                          </p>
-                        ) : (
-                          <div className="space-y-1.5">
-                            {constraintItems.map((item) => (
-                              <label
-                                key={item.key}
-                                className="flex cursor-pointer items-start gap-2 rounded-lg bg-white px-2.5 py-1.5 text-[11px]"
-                              >
-                                <input
-                                  type="checkbox"
-                                  checked={Boolean(manualChecks[item.key])}
-                                  onChange={(e) =>
-                                    setManualChecks((prev) => ({
-                                      ...prev,
-                                      [item.key]: e.target.checked
-                                    }))
-                                  }
-                                  className="mt-0.5 rounded border-gray-300"
-                                />
-                                <span>
-                                  <strong className="text-gray-800">{item.label}：</strong>
-                                  <span className="text-gray-600">{item.value}</span>
-                                </span>
-                              </label>
-                            ))}
-                          </div>
-                        )}
-                      </div>
-
-                      <div className="flex flex-col justify-between space-y-2.5">
-                        <div>
-                          <label className="mb-1 block font-semibold text-gray-900">
-                            当前版本审核意见
-                          </label>
-                          <textarea
-                            rows={3}
-                            value={reviewNote}
-                            onChange={(e) => setReviewNote(e.target.value)}
-                            placeholder="记录构图、外观一致性或修改建议（仅作用于当前选中的版本）"
-                            className="w-full rounded-lg border border-gray-200 bg-white px-3 py-2 focus:border-blue-500 focus:outline-none"
-                          />
-                        </div>
-                        <div className="flex flex-wrap items-center gap-2">
-                          <button
-                            type="button"
-                            disabled={!selectedVersion || reviewSubmitting}
-                            onClick={() => void handleCompareReview("approved")}
-                            className="rounded-lg bg-emerald-600 px-3 py-1.5 font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
-                          >
-                            审核通过
-                          </button>
-                          <button
-                            type="button"
-                            disabled={!selectedVersion || reviewSubmitting}
-                            onClick={() => void handleCompareReview("rejected")}
-                            className="rounded-lg bg-rose-600 px-3 py-1.5 font-medium text-white hover:bg-rose-700 disabled:opacity-50"
-                          >
-                            标记拒绝
-                          </button>
-                          <button
-                            type="button"
-                            disabled={!selectedVersion || reviewSubmitting}
-                            onClick={() => void handleCompareReview("pending")}
-                            className="rounded-lg border border-gray-200 bg-white px-3 py-1.5 font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50"
-                          >
-                            重置待审
-                          </button>
-                        </div>
                       </div>
                     </div>
                   </div>
@@ -1584,7 +1320,6 @@ export function ProductDetailPage() {
             <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-5">
               {assets.map((asset, idx) => {
                 const isCover = product.coverVersionId === asset.currentVersionId;
-                const reviewMeta = REVIEW_STATUS_META[asset.reviewStatus];
                 const lockedEntry = masterImages.find(
                   (m) => m.assetVersionId === asset.currentVersionId
                 );
@@ -1623,11 +1358,6 @@ export function ProductDetailPage() {
                           </span>
                         )}
                       </div>
-                      <span
-                        className={`absolute top-2 right-2 rounded border px-1.5 py-0.5 text-[10px] font-medium ${reviewMeta.className}`}
-                      >
-                        {reviewMeta.label}
-                      </span>
                       <button
                         type="button"
                         onClick={(e) => {
@@ -1686,7 +1416,7 @@ export function ProductDetailPage() {
                             onClick={() => openCompareWithAsset(asset)}
                             className="text-[11px] font-medium text-gray-600 hover:text-blue-600"
                           >
-                            对比审核
+                            对比
                           </button>
                         ) : (
                           <a
@@ -2021,7 +1751,7 @@ export function ProductDetailPage() {
                   onChange={(e) => setLockIsPrimary(e.target.checked)}
                   className="rounded border-gray-300"
                 />
-                <span>设为商品主母图（对比审核默认基准）</span>
+                <span>设为商品主母图（对比默认基准）</span>
               </label>
               <div>
                 <label className="mb-1 block font-medium text-gray-700">锁定说明</label>

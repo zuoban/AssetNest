@@ -41,7 +41,7 @@ import { StorageRegistry } from "../storage/registry.js";
 import { AppError, registerErrorHandler } from "./errors.js";
 import { verifyCsrfHeaderAndOrigin } from "./security.js";
 
-export const APP_VERSION = "0.1.0";
+export const APP_VERSION = "0.2.0";
 
 export interface CreateAppOptions {
   config: ResolvedAppConfig;

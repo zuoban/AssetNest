@@ -63,9 +63,6 @@ const DEFAULT_RULES: ExportTemplateRules = {
     maxTitleCodePoints: 120,
     requiredFields: ["title", "description"]
   },
-  review: {
-    requireApprovedForFormal: true
-  },
   naming: {
     carouselPrefix: "Carousel",
     mainImageName: "01_Main",
@@ -191,7 +188,9 @@ export function TemplatesPage() {
     setNotice(null);
 
     const nextRules: ExportTemplateRules = {
-      ...rules,
+      folders: rules.folders,
+      pdp: rules.pdp,
+      naming: rules.naming,
       carousel: { ...rules.carousel, allowedExts: parseExtCsv(carouselExtsText) },
       detail: { ...rules.detail, allowedExts: parseExtCsv(detailExtsText) },
       sku: { ...rules.sku, allowedExts: parseExtCsv(skuExtsText) },
@@ -241,7 +240,7 @@ export function TemplatesPage() {
         <div>
           <h1 className="text-xl font-semibold tracking-tight text-gray-900">导出模板规则</h1>
           <p className="mt-0.5 text-xs text-gray-500">
-            配置各平台/市场的文件夹结构、图片数量/比例/分辨率、审核门槛与 PDP 必填字段；每次保存自动递增版本号
+            配置各平台/市场的文件夹结构、图片数量/比例/分辨率及 PDP 必填字段；每次保存自动递增版本号
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -736,7 +735,7 @@ export function TemplatesPage() {
               </div>
             </div>
 
-            {/* PDP & Review Gate */}
+            {/* PDP and naming */}
             <div className="grid grid-cols-1 gap-4 border-t border-gray-100 pt-4 sm:grid-cols-2 text-xs">
               <div className="space-y-2">
                 <h3 className="flex items-center gap-1.5 font-semibold text-gray-900">
@@ -783,21 +782,7 @@ export function TemplatesPage() {
               </div>
 
               <div className="space-y-2">
-                <h3 className="font-semibold text-gray-900">审核门槛与命名</h3>
-                <label className="inline-flex cursor-pointer items-center gap-2 rounded-lg border border-gray-200 bg-gray-50 px-3 py-2 text-gray-800">
-                  <input
-                    type="checkbox"
-                    checked={rules.review.requireApprovedForFormal}
-                    onChange={(e) =>
-                      setRules((prev) => ({
-                        ...prev,
-                        review: { requireApprovedForFormal: e.target.checked }
-                      }))
-                    }
-                    className="h-4 w-4 rounded border-gray-300 text-blue-600"
-                  />
-                  正式 Release 要求所有素材版本已通过审核（未审核将阻断）
-                </label>
+                <h3 className="font-semibold text-gray-900">文件命名</h3>
                 <div className="grid grid-cols-2 gap-2">
                   <div>
                     <label className="block text-[11px] text-gray-600">主图文件名</label>

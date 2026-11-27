@@ -23,7 +23,6 @@ const CATEGORIES = [
   "SmartHome"
 ];
 const PURPOSES = ["main", "carousel", "sku", "detail", "raw", "video"];
-const REVIEW_STATUSES = ["approved", "pending", "rejected"] as const;
 const MARKETS = ["TH", "SG", "MY", "VN", "US", "JP"];
 const ZH_TOPICS = ["无线降噪耳机", "便携咖啡机", "高速吹风机", "桌面加湿器", "磁吸充电宝", "智能投影仪"];
 const EN_TOPICS = [
@@ -120,8 +119,8 @@ async function main() {
      VALUES (?, ?, ?, 'image', ?, 'studio', ?, ?, ?, ?, ?)`
   );
   const insertVersion = db.raw.prepare(
-    `INSERT INTO asset_versions (id, asset_id, file_id, version_no, original_filename, review_status, change_note, created_at)
-     VALUES (?, ?, ?, 1, ?, ?, '', ?)`
+    `INSERT INTO asset_versions (id, asset_id, file_id, version_no, original_filename, change_note, created_at)
+     VALUES (?, ?, ?, 1, ?, '', ?)`
   );
   const insertProdAsset = db.raw.prepare(
     "INSERT INTO product_assets (product_id, asset_id, created_at) VALUES (?, ?, ?)"
@@ -182,7 +181,6 @@ async function main() {
           const globalIdx = pIdx * ASSETS_PER_PRODUCT + aIdx;
           const sha = crypto.createHash("sha256").update(`bench-${globalIdx}`).digest("hex");
           const purpose = PURPOSES[aIdx % PURPOSES.length]!;
-          const reviewStatus = REVIEW_STATUSES[aIdx % REVIEW_STATUSES.length]!;
           const marketTagId = tagIds[aIdx % tagIds.length]!;
           const marketLabel = MARKETS[aIdx % MARKETS.length]!;
           const fileName = `${spu}_${purpose}_${String(aIdx + 1).padStart(2, "0")}.jpg`;
@@ -201,7 +199,7 @@ async function main() {
             now,
             now
           );
-          insertVersion.run(vid, aid, fid, fileName, reviewStatus, now);
+          insertVersion.run(vid, aid, fid, fileName, now);
           insertProdAsset.run(pid, aid, now);
           insertAssetTag.run(aid, marketTagId, now);
           insertSearchDoc.run("asset", aid, assetSearchText, now);
@@ -260,12 +258,11 @@ async function main() {
       }
     },
     {
-      name: "Combined filter (ZH keyword + tagId + reviewStatus=approved + type=image)",
+      name: "Combined filter (ZH keyword + tagId + type=image)",
       run: () => {
         const res = listAssets(db, {
           q: "便携咖啡机",
           tagId: sampleTagId,
-          reviewStatus: "approved",
           type: "image",
           page: 1,
           pageSize: 60,
@@ -275,11 +272,10 @@ async function main() {
       }
     },
     {
-      name: "Filter by productId + reviewStatus=approved",
+      name: "Filter by productId",
       run: () => {
         const res = listAssets(db, {
           productId: sampleProductId,
-          reviewStatus: "approved",
           page: 1,
           pageSize: 60,
           sort: "newest"

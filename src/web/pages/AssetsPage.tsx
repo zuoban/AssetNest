@@ -1,16 +1,16 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useSearchParams } from "react-router-dom";
+import { Link, useSearchParams } from "react-router-dom";
 import { useVirtualizer } from "@tanstack/react-virtual";
 import {
   AlertCircle,
   Check,
   CheckCircle2,
+  ChevronRight,
   Download,
   FileArchive,
   FileText,
   Film,
   Folder,
-  FolderPlus,
   Grid,
   HardDrive,
   History,
@@ -34,45 +34,46 @@ import {
 import type {
   AssetDetail,
   AssetListItem,
+  AssetSetKind,
   AssetType,
   FolderRecord,
   ProductSummary,
-  ReviewStatus,
   StorageProviderSummary,
   StoreRecord,
   TagDimension,
   TagRecord
 } from "../../shared/types";
-import {
-  api,
-  ApiClientError,
-  type CompressionBatchProgress,
-  type ImageUploadSizes,
-  type PreparedUploadFile,
-  type UploadTransferProgress
-} from "../api/client";
+import { api, ApiClientError } from "../api/client";
 import { AssetLightbox } from "../components/AssetLightbox";
+import { BatchAssetUpload, type DirectAssetUploadRequest, type PreparedUploadOptions } from "../components/BatchAssetUpload";
 import { ConfirmDialog, type ConfirmDialogState } from "../components/ConfirmDialog";
-import { FileDropButton, useFileDrop } from "../components/FileDropButton";
+import { useFileDrop } from "../components/FileDropButton";
+import { FolderTreeSidebar } from "../components/FolderTreeSidebar";
 import { ImageCompressionSwitch } from "../components/ImageCompressionSwitch";
 import { StorageStatusBadge } from "../components/StatusBadge";
 import {
-  CompressionProgressPanel,
-  formatPreparedItemStatus,
-  PreparedUploadList,
-  UploadTransferProgressPanel
-} from "../components/UploadProgressBar";
-import { usePreparedUploadFiles } from "../hooks/usePreparedUploadFiles";
+  buildFolderTree,
+  formatFolderSelectOption,
+  getFolderBreadcrumb,
+  getFolderSubtreeIdSet,
+  type FolderTreeNode
+} from "../utils/folderTree";
 import {
   ASSET_PURPOSES,
   formatBytes,
   formatDateTime,
   formatUploadCompression,
-  REVIEW_STATUS_META,
   TAG_DIMENSION_LABELS
 } from "../utils/format";
 
-type QuickView = "all" | "favorite" | "pending" | "unfiled";
+type QuickView = "all" | "favorite" | "unfiled";
+
+const ASSET_GROUP_LABELS: Record<AssetSetKind, string> = {
+  carousel: "轮播图组",
+  detail: "详情图组",
+  sku: "SKU 图组",
+  video: "视频组"
+};
 
 const DIMENSION_ORDER: TagDimension[] = [
   "market",
@@ -85,8 +86,6 @@ const DIMENSION_ORDER: TagDimension[] = [
 
 export function AssetsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
-  const uploadInFlight = useRef(false);
-  const versionUploadInFlight = useRef(false);
   const scrollParentRef = useRef<HTMLDivElement>(null);
 
   // Taxonomy & reference lists
@@ -96,32 +95,22 @@ export function AssetsPage() {
   const [storages, setStorages] = useState<StorageProviderSummary[]>([]);
   const [stores, setStores] = useState<StoreRecord[]>([]);
 
-  const initialReviewParam = searchParams.get("reviewStatus");
-  const initialReviewStatus: ReviewStatus | "" =
-    initialReviewParam === "pending" ||
-    initialReviewParam === "approved" ||
-    initialReviewParam === "rejected"
-      ? initialReviewParam
-      : "";
   const initialQuickViewParam = searchParams.get("quickView");
   const initialQuickView: QuickView =
     initialQuickViewParam === "favorite" ||
-    initialQuickViewParam === "pending" ||
     initialQuickViewParam === "unfiled"
       ? initialQuickViewParam
-      : initialReviewStatus === "pending"
-        ? "pending"
-        : "all";
+      : "all";
 
   // Filter state
   const [quickView, setQuickView] = useState<QuickView>(initialQuickView);
   const [folderId, setFolderId] = useState<string>("");
+  const [includeSubfolders, setIncludeSubfolders] = useState<boolean>(true);
   const [tagId, setTagId] = useState<string>("");
   const [storageId, setStorageId] = useState<string>("");
   const [productId, setProductId] = useState<string>(searchParams.get("productId") || "");
   const [storeId, setStoreId] = useState<string>("");
   const [assetType, setAssetType] = useState<AssetType | "">("");
-  const [reviewStatus, setReviewStatus] = useState<ReviewStatus | "">(initialReviewStatus);
   const [query, setQuery] = useState("");
   const [sort, setSort] = useState<"newest" | "oldest" | "name_asc" | "size_desc">("newest");
   const [viewMode, setViewMode] = useState<"grid" | "list">("grid");
@@ -151,24 +140,16 @@ export function AssetsPage() {
   const [savingInspector, setSavingInspector] = useState(false);
   const [regenBusy, setRegenBusy] = useState(false);
 
-  // Version upload & independent per-version review
+  // Version upload
   const [versionFormOpen, setVersionFormOpen] = useState(false);
-  const [versionFileError, setVersionFileError] = useState<string | null>(null);
   const [versionChangeNote, setVersionChangeNote] = useState("");
   const [versionPromptText, setVersionPromptText] = useState("");
   const [versionSetCurrent, setVersionSetCurrent] = useState(true);
   const [compressVersionImage, setCompressVersionImage] = useState(true);
   const [versionUploading, setVersionUploading] = useState(false);
-  const [versionUploadProgress, setVersionUploadProgress] = useState<UploadTransferProgress | null>(
-    null
-  );
-  const versionUploadPrep = usePreparedUploadFiles(compressVersionImage);
   const [versionActionBusyId, setVersionActionBusyId] = useState<string | null>(null);
-  const [reviewingVersionId, setReviewingVersionId] = useState<string | null>(null);
-  const [versionReviewNote, setVersionReviewNote] = useState("");
 
   // Upload state
-  const [uploadModalError, setUploadModalError] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [compressUploadImages, setCompressUploadImages] = useState(true);
   const [exportingStandard, setExportingStandard] = useState(false);
@@ -177,19 +158,9 @@ export function AssetsPage() {
   const [uploadTargetFolderId, setUploadTargetFolderId] = useState("");
   const [uploadTargetPurpose, setUploadTargetPurpose] = useState("raw");
   const [uploadTargetStorageId, setUploadTargetStorageId] = useState("");
-  const [modalUploadProgress, setModalUploadProgress] = useState<UploadTransferProgress | null>(
-    null
-  );
-  const [canvasCompressionProgress, setCanvasCompressionProgress] =
-    useState<CompressionBatchProgress | null>(null);
-  const [canvasUploadProgress, setCanvasUploadProgress] = useState<UploadTransferProgress | null>(
-    null
-  );
-  const modalUploadPrep = usePreparedUploadFiles(compressUploadImages);
+  const [canvasUpload, setCanvasUpload] = useState<DirectAssetUploadRequest | null>(null);
 
-  // Inline folder/tag creation
-  const [newFolderName, setNewFolderName] = useState("");
-  const [addingFolder, setAddingFolder] = useState(false);
+  // Inline tag creation
   const [newTagDim, setNewTagDim] = useState<TagDimension>("custom");
   const [newTagName, setNewTagName] = useState("");
   const [addingTag, setAddingTag] = useState(false);
@@ -264,9 +235,9 @@ export function AssetsPage() {
         storeId: storeId || undefined,
         tagId: tagId || undefined,
         folderId: folderId || undefined,
+        includeSubfolders: folderId ? includeSubfolders : undefined,
         storageId: storageId || undefined,
         type: assetType || undefined,
-        reviewStatus: quickView === "pending" ? "pending" : reviewStatus || undefined,
         favorite: quickView === "favorite" ? true : undefined,
         unfiled: quickView === "unfiled" ? true : undefined,
         sort,
@@ -288,7 +259,18 @@ export function AssetsPage() {
     } finally {
       setLoading(false);
     }
-  }, [query, productId, storeId, tagId, folderId, storageId, assetType, reviewStatus, quickView, sort]);
+  }, [
+    query,
+    productId,
+    storeId,
+    tagId,
+    folderId,
+    includeSubfolders,
+    storageId,
+    assetType,
+    quickView,
+    sort
+  ]);
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
@@ -323,19 +305,14 @@ export function AssetsPage() {
   useEffect(() => {
     if (!activeAssetId) {
       setActiveAsset(null);
-      versionUploadPrep.clear();
       return;
     }
     setVersionFormOpen(false);
-    versionUploadPrep.clear();
-    setVersionFileError(null);
-    setVersionUploadProgress(null);
     setVersionChangeNote("");
     setVersionPromptText("");
     setVersionSetCurrent(true);
-    setReviewingVersionId(null);
     void loadActiveAsset(activeAssetId);
-  }, [activeAssetId, loadActiveAsset, versionUploadPrep.clear]);
+  }, [activeAssetId, loadActiveAsset]);
 
   useEffect(() => {
     if (!activeAssetId || lightboxIndex !== null || confirmDialog || uploadModalOpen) return;
@@ -357,26 +334,36 @@ export function AssetsPage() {
       productId ||
       storeId ||
       assetType ||
-      reviewStatus ||
       query.trim()
   );
 
   const resetAllFilters = () => {
     setQuickView("all");
     setFolderId("");
+    setIncludeSubfolders(true);
     setTagId("");
     setStorageId("");
     setProductId("");
     setStoreId("");
     setAssetType("");
-    setReviewStatus("");
     setQuery("");
     const nextParams = new URLSearchParams(searchParams);
     nextParams.delete("productId");
-    nextParams.delete("reviewStatus");
     nextParams.delete("quickView");
     setSearchParams(nextParams, { replace: true });
   };
+
+  const folderTree = useMemo(() => buildFolderTree(folders), [folders]);
+
+  const selectedFolderNode = useMemo(
+    () => (folderId ? folderTree.nodeMap.get(folderId) ?? null : null),
+    [folderId, folderTree.nodeMap]
+  );
+
+  const folderBreadcrumb = useMemo(
+    () => (folderId ? getFolderBreadcrumb(folderTree.nodeMap, folderId) : []),
+    [folderId, folderTree.nodeMap]
+  );
 
   const tagsByDimension = useMemo(() => {
     const grouped = new Map<TagDimension, TagRecord[]>();
@@ -402,11 +389,6 @@ export function AssetsPage() {
 
   const selectQuickView = (view: QuickView) => {
     setQuickView(view);
-    if (view === "pending") {
-      setReviewStatus("pending");
-    } else if (reviewStatus === "pending") {
-      setReviewStatus("");
-    }
     if (view !== "all") {
       setFolderId("");
       setTagId("");
@@ -444,137 +426,105 @@ export function AssetsPage() {
     }
   };
 
-  const closeUploadModal = () => {
-    if (uploading) return;
-    modalUploadPrep.clear();
-    setModalUploadProgress(null);
-    setUploadModalError(null);
-    setUploadModalOpen(false);
-  };
-
   const toggleVersionForm = () => {
     if (versionUploading) return;
-    setVersionFormOpen((prev) => {
-      const next = !prev;
-      if (!next) {
-        versionUploadPrep.clear();
-        setVersionFileError(null);
-        setVersionUploadProgress(null);
-      }
-      return next;
-    });
+    setVersionFormOpen((prev) => !prev);
   };
 
   const performUpload = async (
     files: File[],
-    opts: {
-      source: "modal" | "canvas";
-      productId?: string;
-      folderId?: string;
-      purpose?: string;
-      storageId?: string;
-      preparedFiles?: PreparedUploadFile[];
-      compressionSummary?: ImageUploadSizes | null;
-    }
+    options: Parameters<typeof api.uploadAssets>[1],
+    closeModal = false
   ) => {
-    if (files.length === 0 || uploadInFlight.current) return;
-    uploadInFlight.current = true;
-    setUploading(true);
-    setUploadModalError(null);
     setError(null);
     setNotice(null);
-    if (opts.source === "modal") {
-      const total = (opts.preparedFiles ?? []).reduce((sum, item) => sum + item.upload.size, 0);
-      setModalUploadProgress({ loaded: 0, total, percent: 0, phase: "uploading" });
-    } else {
-      setCanvasCompressionProgress(null);
-      setCanvasUploadProgress(
-        compressUploadImages
-          ? null
-          : {
-              loaded: 0,
-              total: files.reduce((sum, f) => sum + f.size, 0),
-              percent: 0,
-              phase: "uploading"
-            }
-      );
-    }
-    try {
-      const res = await api.uploadAssets(files, {
-        compressImages: compressUploadImages,
-        preparedFiles: opts.preparedFiles,
-        compressionSummary: opts.compressionSummary,
-        onCompressionProgress:
-          opts.source === "canvas" ? (progress) => setCanvasCompressionProgress(progress) : undefined,
-        onUploadProgress:
-          opts.source === "modal"
-            ? (progress) => setModalUploadProgress(progress)
-            : (progress) => setCanvasUploadProgress(progress),
-        productId: opts.productId || undefined,
-        folderId: opts.folderId || undefined,
-        purpose: opts.purpose || undefined,
-        storageId: opts.storageId || undefined
-      });
-      setNotice(
-        `成功上传 ${res.uploadedCount} 个素材${
-          res.deduplicatedCount > 0 ? `（${res.deduplicatedCount} 个命中内容去重）` : ""
-        }${formatUploadCompression(res.compression)}`
-      );
-      if (opts.source === "modal") {
-        setUploadModalOpen(false);
-        modalUploadPrep.clear();
-      }
-      await Promise.all([loadAssets(), loadTaxonomy()]);
-      if (res.items[0]) {
-        setActiveAssetId(res.items[0].id);
-      }
-    } catch (err) {
-      const message = err instanceof ApiClientError ? err.message : "上传失败";
-      if (opts.source === "modal") setUploadModalError(message);
-      else setError(message);
-    } finally {
-      uploadInFlight.current = false;
-      setUploading(false);
-      setModalUploadProgress(null);
-      setCanvasCompressionProgress(null);
-      setCanvasUploadProgress(null);
-    }
+    const res = await api.uploadAssets(files, options);
+    setNotice(
+      `成功上传 ${res.uploadedCount} 个素材${
+        res.deduplicatedCount > 0 ? `（${res.deduplicatedCount} 个命中内容去重）` : ""
+      }${formatUploadCompression(res.compression)}`
+    );
+    if (closeModal) setUploadModalOpen(false);
+    await Promise.all([loadAssets(), loadTaxonomy()]);
+    if (res.items[0]) setActiveAssetId(res.items[0].id);
   };
 
   const { draggingOver, dropProps: workspaceDropProps } = useFileDrop((files) => {
-    void performUpload(files, {
-      source: "canvas",
-      productId: productId || undefined,
-      folderId: folderId || undefined,
-      storageId: storageId || undefined
+    setCanvasUpload((current) => current ?? {
+      files,
+      options: {
+        compressImages: compressUploadImages,
+        productId: productId || undefined,
+        folderId: folderId || undefined,
+        storageId: storageId || undefined
+      }
     });
-  }, uploading || uploadModalOpen);
+  }, uploading || !!canvasUpload || uploadModalOpen);
 
-  const handleCreateFolder = async () => {
-    if (!newFolderName.trim()) return;
+  const handleCreateFolder = async (payload: {
+    name: string;
+    parentId: string | null;
+  }): Promise<FolderRecord | null> => {
+    const trimmed = payload.name.trim();
+    if (!trimmed) return null;
     setError(null);
     try {
-      await api.createFolder({ name: newFolderName.trim() });
-      setNewFolderName("");
-      setAddingFolder(false);
+      const created = await api.createFolder({
+        name: trimmed,
+        parentId: payload.parentId
+      });
       await loadTaxonomy();
+      return created;
     } catch (err) {
       setError(err instanceof ApiClientError ? err.message : "新建文件夹失败");
+      return null;
     }
   };
 
-  const handleDeleteFolder = (folder: FolderRecord) => {
+  const handleUpdateFolder = async (
+    id: string,
+    payload: { name?: string; parentId?: string | null }
+  ): Promise<boolean> => {
+    setError(null);
+    try {
+      await api.updateFolder(id, payload);
+      await Promise.all([loadTaxonomy(), loadAssets()]);
+      return true;
+    } catch (err) {
+      setError(err instanceof ApiClientError ? err.message : "更新文件夹失败");
+      return false;
+    }
+  };
+
+  const handleDeleteFolder = (node: FolderTreeNode) => {
+    const { folder, descendantFolderCount, totalAssetCount, pathLabel } = node;
+    const hasSubfolders = descendantFolderCount > 0;
+    const description = hasSubfolders
+      ? `确定删除文件夹「${pathLabel}」及其下 ${descendantFolderCount} 个子文件夹吗？其中${
+          totalAssetCount > 0 ? `的 ${totalAssetCount} 个` : ""
+        }素材不会被删除，将自动变为未归类。`
+      : `确定删除文件夹「${pathLabel}」吗？其中素材不会被删除，将自动变为未归类。`;
+
     setConfirmDialog({
-      title: "删除文件夹",
-      description: `确定删除文件夹「${folder.name}」吗？其中素材不会被删除，将自动变为未归类。`,
-      confirmLabel: "删除文件夹",
+      title: hasSubfolders ? "删除文件夹及子目录" : "删除文件夹",
+      description,
+      confirmLabel: hasSubfolders ? "全部删除" : "删除文件夹",
       tone: "warning",
       onConfirm: async () => {
         setConfirmBusy(true);
         setError(null);
         try {
-          await api.deleteFolder(folder.id);
-          if (folderId === folder.id) setFolderId("");
+          const deletedSet = getFolderSubtreeIdSet(folderTree.nodeMap, folder.id);
+          deletedSet.add(folder.id);
+          await api.deleteFolder(folder.id, { recursive: hasSubfolders });
+          if (folderId && deletedSet.has(folderId)) {
+            setFolderId(folder.parentId && !deletedSet.has(folder.parentId) ? folder.parentId : "");
+          }
+          if (batchFolderId && deletedSet.has(batchFolderId)) setBatchFolderId("");
+          if (editFolderId && deletedSet.has(editFolderId)) setEditFolderId("");
+          if (uploadTargetFolderId && deletedSet.has(uploadTargetFolderId)) {
+            setUploadTargetFolderId("");
+          }
           setConfirmDialog(null);
           await Promise.all([loadTaxonomy(), loadAssets()]);
         } catch (err) {
@@ -642,56 +592,27 @@ export function AssetsPage() {
     }
   };
 
-  const handleAppendVersion = async () => {
-    const versionItem = versionUploadPrep.items[0];
-    if (
-      !activeAsset ||
-      !versionItem ||
-      versionFileError ||
-      versionUploadPrep.summary.isCompressing ||
-      versionUploadInFlight.current
-    ) {
-      return;
-    }
-    versionUploadInFlight.current = true;
-    setVersionUploading(true);
-    setVersionUploadProgress({
-      loaded: 0,
-      total: versionItem.uploadFile.size,
-      percent: 0,
-      phase: "uploading"
-    });
+  const handleAppendVersion = async ([file]: File[], options: PreparedUploadOptions) => {
+    if (!activeAsset || !file) return;
     setError(null);
     setNotice(null);
-    try {
-      const res = await api.appendAssetVersion(activeAsset.id, versionItem.originalFile, {
-        compressImages: compressVersionImage,
-        preparedFiles: [{ original: versionItem.originalFile, upload: versionItem.uploadFile }],
-        compressionSummary: versionUploadPrep.summary.compressionSummary,
-        onUploadProgress: (progress) => setVersionUploadProgress(progress),
-        changeNote: versionChangeNote.trim() || undefined,
-        promptText: versionPromptText.trim() || undefined,
-        setAsCurrent: versionSetCurrent
-      });
-      setActiveAsset(res.asset);
-      syncInspectorFields(res.asset);
-      versionUploadPrep.clear();
-      setVersionChangeNote("");
-      setVersionPromptText("");
-      setVersionFormOpen(false);
-      setNotice(
-        `已追加新版本 V${res.version.versionNo}（旧版本完整保留${
-          res.deduplicated ? "，复用已有底层文件" : ""
-        }）${formatUploadCompression(res.compression)}`
-      );
-      await loadAssets();
-    } catch (err) {
-      setError(err instanceof ApiClientError ? err.message : "上传新版本失败");
-    } finally {
-      versionUploadInFlight.current = false;
-      setVersionUploading(false);
-      setVersionUploadProgress(null);
-    }
+    const res = await api.appendAssetVersion(activeAsset.id, file, {
+      ...options,
+      changeNote: versionChangeNote.trim() || undefined,
+      promptText: versionPromptText.trim() || undefined,
+      setAsCurrent: versionSetCurrent
+    });
+    setActiveAsset(res.asset);
+    syncInspectorFields(res.asset);
+    setVersionChangeNote("");
+    setVersionPromptText("");
+    setVersionFormOpen(false);
+    setNotice(
+      `已追加新版本 V${res.version.versionNo}（旧版本完整保留${
+        res.deduplicated ? "，复用已有底层文件" : ""
+      }）${formatUploadCompression(res.compression)}`
+    );
+    await loadAssets();
   };
 
   const handleSwitchVersion = async (versionId: string, versionNo: number) => {
@@ -706,27 +627,6 @@ export function AssetsPage() {
       await loadAssets();
     } catch (err) {
       setError(err instanceof ApiClientError ? err.message : "切换版本失败");
-    } finally {
-      setVersionActionBusyId(null);
-    }
-  };
-
-  const handleReviewVersion = async (versionId: string, nextStatus: ReviewStatus) => {
-    if (!activeAsset) return;
-    setVersionActionBusyId(versionId);
-    setError(null);
-    try {
-      const updatedVer = await api.reviewAssetVersion(versionId, {
-        reviewStatus: nextStatus,
-        reviewNote: versionReviewNote.trim()
-      });
-      setReviewingVersionId(null);
-      setNotice(
-        `版本 V${updatedVer.versionNo} 审核状态已更新为「${REVIEW_STATUS_META[updatedVer.reviewStatus].label}」`
-      );
-      await Promise.all([loadActiveAsset(activeAsset.id), loadAssets()]);
-    } catch (err) {
-      setError(err instanceof ApiClientError ? err.message : "更新版本审核状态失败");
     } finally {
       setVersionActionBusyId(null);
     }
@@ -762,13 +662,11 @@ export function AssetsPage() {
       | "move_folder"
       | "add_tags"
       | "link_products"
-      | "set_review_status"
       | "soft_delete",
     extra: {
       folderId?: string | null;
       tagIds?: string[];
       productIds?: string[];
-      reviewStatus?: ReviewStatus;
     } = {}
   ) => {
     const assetIds = Array.from(selectedIds);
@@ -802,13 +700,11 @@ export function AssetsPage() {
       | "move_folder"
       | "add_tags"
       | "link_products"
-      | "set_review_status"
       | "soft_delete",
     extra: {
       folderId?: string | null;
       tagIds?: string[];
       productIds?: string[];
-      reviewStatus?: ReviewStatus;
     } = {}
   ) => {
     const assetIds = Array.from(selectedIds);
@@ -876,7 +772,7 @@ export function AssetsPage() {
           <ImageCompressionSwitch
             checked={compressUploadImages}
             onChange={setCompressUploadImages}
-            disabled={uploading}
+            disabled={uploading || !!canvasUpload}
           />
           <button
             type="button"
@@ -907,14 +803,11 @@ export function AssetsPage() {
           </button>
           <button
             type="button"
-            disabled={uploading}
+            disabled={uploading || !!canvasUpload}
             onClick={() => {
               setUploadTargetProductId(productId);
               setUploadTargetFolderId(folderId);
               setUploadTargetStorageId(storageId);
-              modalUploadPrep.clear();
-              setModalUploadProgress(null);
-              setUploadModalError(null);
               setUploadModalOpen(true);
             }}
             className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3.5 py-1.5 text-xs font-medium text-white hover:bg-blue-700"
@@ -947,37 +840,18 @@ export function AssetsPage() {
           </button>
         </div>
       )}
-      {!uploadModalOpen && canvasUploadProgress ? (
-        <UploadTransferProgressPanel
-          progress={canvasUploadProgress}
-          label="正在上传素材…"
-          compressionSummary={
-            canvasCompressionProgress && canvasCompressionProgress.total > 0
-              ? {
-                  originalBytes: canvasCompressionProgress.originalBytes,
-                  uploadedBytes: canvasCompressionProgress.compressedBytes,
-                  unchangedImages: canvasCompressionProgress.unchangedImages
-                }
-              : null
-          }
+      {canvasUpload && (
+        <BatchAssetUpload
+          direct={canvasUpload}
+          onSubmit={performUpload}
+          onError={setError}
+          onComplete={() => setCanvasUpload(null)}
         />
-      ) : !uploadModalOpen && canvasCompressionProgress ? (
-        <CompressionProgressPanel
-          completed={canvasCompressionProgress.completed}
-          total={canvasCompressionProgress.total}
-          percent={canvasCompressionProgress.percent}
-          isCompressing={canvasCompressionProgress.completed < canvasCompressionProgress.total}
-          originalBytes={canvasCompressionProgress.originalBytes}
-          compressedBytes={canvasCompressionProgress.compressedBytes}
-          savedBytes={canvasCompressionProgress.savedBytes}
-          savedPercent={canvasCompressionProgress.savedPercent}
-          unchangedImages={canvasCompressionProgress.unchangedImages}
-        />
-      ) : null}
+      )}
 
       <div className="flex h-[calc(100vh-11.5rem)] min-h-[560px] overflow-hidden rounded-xl border border-gray-200 bg-white">
         {/* Left Taxonomy Rail */}
-        <aside className="hidden w-56 shrink-0 flex-col border-r border-gray-200 bg-gray-50/60 md:flex">
+        <aside className="hidden w-60 shrink-0 flex-col border-r border-gray-200 bg-gray-50/60 md:flex">
           <div className="flex-1 space-y-5 overflow-y-auto p-3 text-xs">
             <div>
               <div className="mb-1.5 px-2 text-[11px] font-semibold text-gray-400">快捷视图</div>
@@ -985,7 +859,6 @@ export function AssetsPage() {
                 {[
                   { key: "all" as const, label: "全部素材", icon: Layers },
                   { key: "favorite" as const, label: "收藏夹", icon: Star },
-                  { key: "pending" as const, label: "待审核", icon: AlertCircle },
                   { key: "unfiled" as const, label: "未归类", icon: Inbox }
                 ].map((view) => {
                   const Icon = view.icon;
@@ -1009,84 +882,17 @@ export function AssetsPage() {
               </div>
             </div>
 
-            <div>
-              <div className="mb-1.5 flex items-center justify-between px-2">
-                <span className="text-[11px] font-semibold text-gray-400">文件夹</span>
-                <button
-                  type="button"
-                  onClick={() => setAddingFolder((prev) => !prev)}
-                  className="rounded p-0.5 text-gray-400 hover:bg-gray-200 hover:text-gray-700"
-                  title="新建文件夹"
-                >
-                  <FolderPlus className="h-3.5 w-3.5" />
-                </button>
-              </div>
-              {addingFolder && (
-                <div className="mb-2 flex gap-1 px-1">
-                  <input
-                    type="text"
-                    value={newFolderName}
-                    onChange={(e) => setNewFolderName(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter") void handleCreateFolder();
-                    }}
-                    placeholder="文件夹名称"
-                    className="min-w-0 flex-1 rounded border border-gray-300 bg-white px-2 py-1 text-[11px] focus:border-blue-500 focus:outline-none"
-                  />
-                  <button
-                    type="button"
-                    onClick={() => void handleCreateFolder()}
-                    className="rounded bg-blue-600 px-2 py-1 text-[11px] text-white"
-                  >
-                    加
-                  </button>
-                </div>
-              )}
-              <div className="space-y-0.5">
-                {folders.length === 0 ? (
-                  <p className="px-2 text-[11px] text-gray-400">暂无文件夹</p>
-                ) : (
-                  folders.map((folder) => {
-                    const active = folderId === folder.id;
-                    return (
-                      <div
-                        key={folder.id}
-                        className={`group flex items-center justify-between rounded-lg px-2 py-1.5 ${
-                          active
-                            ? "bg-blue-50 font-medium text-blue-700"
-                            : "text-gray-700 hover:bg-gray-100"
-                        }`}
-                      >
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setQuickView("all");
-                            setFolderId(active ? "" : folder.id);
-                          }}
-                          className="flex min-w-0 flex-1 items-center gap-2 text-left"
-                        >
-                          <Folder className="h-3.5 w-3.5 shrink-0" />
-                          <span className="truncate">{folder.name}</span>
-                        </button>
-                        <div className="flex items-center gap-1">
-                          <span className="font-mono-tabular text-[10px] text-gray-400">
-                            {folder.assetCount}
-                          </span>
-                          <button
-                            type="button"
-                            onClick={() => void handleDeleteFolder(folder)}
-                            className="hidden rounded p-0.5 text-gray-400 hover:text-rose-600 group-hover:block"
-                            title="删除文件夹"
-                          >
-                            <Trash2 className="h-3 w-3" />
-                          </button>
-                        </div>
-                      </div>
-                    );
-                  })
-                )}
-              </div>
-            </div>
+            <FolderTreeSidebar
+              tree={folderTree}
+              selectedFolderId={folderId}
+              onSelectFolder={(nextFolderId) => {
+                setQuickView("all");
+                setFolderId(nextFolderId);
+              }}
+              onCreateFolder={handleCreateFolder}
+              onUpdateFolder={handleUpdateFolder}
+              onDeleteFolder={handleDeleteFolder}
+            />
 
             <div>
               <div className="mb-1.5 flex items-center justify-between px-2">
@@ -1332,25 +1138,6 @@ export function AssetsPage() {
                 <option value="other">其他</option>
               </select>
 
-              <select
-                value={quickView === "pending" ? "pending" : reviewStatus}
-                onChange={(e) => {
-                  const nextReview = e.target.value as ReviewStatus | "";
-                  setQuickView(nextReview === "pending" ? "pending" : "all");
-                  setReviewStatus(nextReview);
-                  const nextParams = new URLSearchParams(searchParams);
-                  if (nextReview) nextParams.set("reviewStatus", nextReview);
-                  else nextParams.delete("reviewStatus");
-                  setSearchParams(nextParams, { replace: true });
-                }}
-                className="rounded-lg border border-gray-200 bg-white px-2 py-1 text-xs text-gray-700 focus:border-blue-500 focus:outline-none"
-              >
-                <option value="">全部审核态</option>
-                <option value="pending">待审核</option>
-                <option value="approved">已通过</option>
-                <option value="rejected">已拒绝</option>
-              </select>
-
               {hasActiveFilters && (
                 <button
                   type="button"
@@ -1362,6 +1149,74 @@ export function AssetsPage() {
                 </button>
               )}
             </div>
+
+            {selectedFolderNode && folderBreadcrumb.length > 0 && (
+              <div
+                data-testid="folder-breadcrumb"
+                className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-blue-100 bg-blue-50/50 px-2.5 py-1.5 text-[11px]"
+              >
+                <div className="flex min-w-0 flex-wrap items-center gap-1 text-gray-600">
+                  <Folder className="h-3.5 w-3.5 shrink-0 text-blue-600" />
+                  <button
+                    type="button"
+                    onClick={() => setFolderId("")}
+                    className="rounded px-1 py-0.5 text-gray-500 hover:bg-blue-100/70 hover:text-blue-700"
+                  >
+                    全部素材
+                  </button>
+                  {folderBreadcrumb.map((crumb, idx) => {
+                    const isCurrent = idx === folderBreadcrumb.length - 1;
+                    return (
+                      <span key={crumb.folder.id} className="inline-flex items-center gap-1">
+                        <ChevronRight className="h-3 w-3 text-gray-400" />
+                        {isCurrent ? (
+                          <span className="font-semibold text-blue-700">{crumb.folder.name}</span>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => setFolderId(crumb.folder.id)}
+                            className="rounded px-1 py-0.5 text-gray-700 hover:bg-blue-100/70 hover:text-blue-700"
+                          >
+                            {crumb.folder.name}
+                          </button>
+                        )}
+                      </span>
+                    );
+                  })}
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  {selectedFolderNode.descendantFolderCount > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => setIncludeSubfolders((prev) => !prev)}
+                      className={`rounded-md border px-2 py-0.5 text-[10px] font-medium transition-colors ${
+                        includeSubfolders
+                          ? "border-blue-200 bg-blue-100/70 text-blue-700 hover:bg-blue-100"
+                          : "border-gray-200 bg-white text-gray-600 hover:bg-gray-50"
+                      }`}
+                      title={
+                        includeSubfolders
+                          ? "当前展示该目录及所有子目录中的素材，点击切换为仅当前目录"
+                          : "当前仅展示该目录直属素材，点击切换为包含子目录"
+                      }
+                    >
+                      {includeSubfolders
+                        ? `含 ${selectedFolderNode.descendantFolderCount} 个子目录`
+                        : "仅当前目录"}
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setFolderId("")}
+                    className="rounded p-0.5 text-gray-400 hover:bg-blue-100/70 hover:text-gray-700"
+                    title="退出文件夹筛选"
+                    aria-label="退出文件夹筛选"
+                  >
+                    <X className="h-3.5 w-3.5" />
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Batch Action Bar */}
@@ -1383,9 +1238,9 @@ export function AssetsPage() {
                   className="rounded border border-blue-200 bg-white px-2 py-1 text-[11px]"
                 >
                   <option value="">移至未归类</option>
-                  {folders.map((f) => (
-                    <option key={f.id} value={f.id}>
-                      {f.name}
+                  {folderTree.flatNodes.map((node) => (
+                    <option key={node.folder.id} value={node.folder.id} title={node.pathLabel}>
+                      {formatFolderSelectOption(node)}
                     </option>
                   ))}
                 </select>
@@ -1452,16 +1307,6 @@ export function AssetsPage() {
               <button
                 type="button"
                 disabled={batchBusy}
-                onClick={() =>
-                  void runBatch("set_review_status", { reviewStatus: "approved" })
-                }
-                className="rounded border border-emerald-200 bg-emerald-50 px-2 py-1 text-[11px] font-medium text-emerald-700 hover:bg-emerald-100"
-              >
-                批量通过
-              </button>
-              <button
-                type="button"
-                disabled={batchBusy}
                 onClick={() => void runBatch("soft_delete")}
                 className="rounded border border-rose-200 bg-rose-50 px-2 py-1 text-[11px] font-medium text-rose-700 hover:bg-rose-100"
               >
@@ -1505,7 +1350,6 @@ export function AssetsPage() {
                     if (!item) return null;
                     const isSelected = selectedIds.has(item.id);
                     const isActive = activeAssetId === item.id;
-                    const reviewMeta = REVIEW_STATUS_META[item.reviewStatus];
                     return (
                       <div
                         key={item.id}
@@ -1575,11 +1419,6 @@ export function AssetsPage() {
                           <div className="font-mono-tabular w-16 text-right text-[11px] text-gray-500">
                             {formatBytes(item.sizeBytes)}
                           </div>
-                          <span
-                            className={`rounded border px-1.5 py-0.5 text-[10px] font-medium ${reviewMeta.className}`}
-                          >
-                            {reviewMeta.label}
-                          </span>
                           <button
                             type="button"
                             onClick={(e) => {
@@ -1622,7 +1461,6 @@ export function AssetsPage() {
                         const itemIndex = startIdx + offset;
                         const isSelected = selectedIds.has(item.id);
                         const isActive = activeAssetId === item.id;
-                        const reviewMeta = REVIEW_STATUS_META[item.reviewStatus];
                         return (
                           <div
                             key={item.id}
@@ -1671,12 +1509,6 @@ export function AssetsPage() {
                               >
                                 <Check className="h-3 w-3" />
                               </button>
-
-                              <span
-                                className={`absolute top-2 right-2 rounded border px-1.5 py-0.5 text-[10px] font-medium ${reviewMeta.className}`}
-                              >
-                                {reviewMeta.label}
-                              </span>
 
                               <div className="absolute right-2 bottom-2 flex items-center gap-1 opacity-0 transition-opacity group-hover:opacity-100">
                                 <button
@@ -1861,6 +1693,42 @@ export function AssetsPage() {
                 </div>
               </div>
 
+              {activeAsset.id === activeAssetId && (
+                <section className="space-y-2 rounded-lg border border-gray-200 bg-white p-2.5">
+                  <h3 className="inline-flex items-center gap-1 font-semibold text-gray-900">
+                    <Layers className="h-3.5 w-3.5 text-blue-600" aria-hidden="true" />
+                    用在哪
+                  </h3>
+                  {activeAsset.listingUsages.length === 0 ? (
+                    <p className="text-[11px] text-gray-500">当前没有上架链接引用此素材</p>
+                  ) : (
+                    <ul className="divide-y divide-gray-100">
+                      {activeAsset.listingUsages.map((usage) => (
+                        <li key={usage.itemId} className="space-y-0.5 py-2">
+                          <p className="break-words text-[11px] text-gray-500">{usage.storeName}</p>
+                          <Link
+                            to={`/listings/${encodeURIComponent(usage.listingId)}?assetGroup=${usage.kind}`}
+                            className="break-words font-medium text-blue-700 underline-offset-2 hover:underline focus-visible:underline"
+                          >
+                            {usage.listingName}
+                            <span className="sr-only"> · {ASSET_GROUP_LABELS[usage.kind]}</span>
+                          </Link>
+                          <p className="text-[11px] text-gray-600">
+                            {ASSET_GROUP_LABELS[usage.kind]} · 第 {usage.position + 1} 位 · 固定使用 V{usage.versionNo}
+                          </p>
+                          {usage.kind === "sku" && usage.skuCode && (
+                            <p className="break-words text-[11px] text-gray-600">商品 SKU {usage.skuCode}</p>
+                          )}
+                          {usage.kind === "sku" && usage.skuChannelCode && (
+                            <p className="break-words text-[11px] text-gray-600">渠道 SKU {usage.skuChannelCode}</p>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </section>
+              )}
+
               {/* Version History & Append New Version */}
               <div className="space-y-2 rounded-lg border border-gray-200 bg-white p-2.5">
                 <div className="flex items-center justify-between gap-2">
@@ -1879,141 +1747,56 @@ export function AssetsPage() {
                   </button>
                 </div>
 
-                {versionFormOpen && (() => {
-                  const versionItem = versionUploadPrep.items[0] ?? null;
-                  const versionStatus = versionItem
-                    ? formatPreparedItemStatus(versionItem, compressVersionImage)
-                    : null;
-                  return (
-                    <div className="space-y-2 rounded-lg border border-blue-100 bg-blue-50/40 p-2.5 text-[11px]">
-                      <p className="text-gray-600">
-                        追加为 V{activeAsset.versions.length + 1}，不覆盖旧版本与已锁定的商品母图。
-                      </p>
-                      <ImageCompressionSwitch
-                        checked={compressVersionImage}
-                        onChange={setCompressVersionImage}
-                        disabled={versionUploading}
-                      />
-                      <FileDropButton
-                        disabled={versionUploading}
-                        onFiles={(files) => {
-                          if (versionUploadInFlight.current) return;
-                          if (files.length > 1) {
-                            setVersionFileError("每次只能上传一个版本文件，请重新选择或拖入单个文件。");
-                            return;
-                          }
-                          versionUploadPrep.setFiles(files[0] ? [files[0]] : []);
-                          setVersionFileError(null);
-                        }}
-                        className="flex items-center justify-center gap-1.5 px-2 py-2 font-medium"
-                      >
-                        <Upload className="h-3.5 w-3.5" />
-                        <span>拖入单个文件，或点击选择</span>
-                      </FileDropButton>
-                      {versionItem && versionStatus && (
-                        <div className="space-y-1.5 rounded-lg border border-gray-200 bg-white p-2">
-                          <div className="flex items-start justify-between gap-2">
-                            <div className="min-w-0 flex-1">
-                              <p className="truncate font-medium text-gray-800">
-                                {versionItem.originalFile.name}
-                              </p>
-                              <p className={`font-mono-tabular mt-0.5 ${versionStatus.toneClass}`}>
-                                {versionStatus.text}
-                              </p>
-                            </div>
-                            {!versionUploading && (
-                              <button
-                                type="button"
-                                aria-label={`移除 ${versionItem.originalFile.name}`}
-                                onClick={() => versionUploadPrep.clear()}
-                                className="rounded p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
-                              >
-                                <X className="h-3.5 w-3.5" />
-                              </button>
-                            )}
-                          </div>
-                          {compressVersionImage && versionUploadPrep.summary.isCompressing && (
-                            <CompressionProgressPanel
-                              compact
-                              completed={versionUploadPrep.summary.completedCount}
-                              total={versionUploadPrep.summary.compressibleCount}
-                              percent={versionUploadPrep.summary.percent}
-                              isCompressing={versionUploadPrep.summary.isCompressing}
-                              originalBytes={versionUploadPrep.summary.originalBytes}
-                              compressedBytes={versionUploadPrep.summary.compressedBytes}
-                              savedBytes={versionUploadPrep.summary.savedBytes}
-                              savedPercent={versionUploadPrep.summary.savedPercent}
-                              unchangedImages={versionUploadPrep.summary.unchangedImages}
+                {versionFormOpen && (
+                  <div className="space-y-2 rounded-lg border border-blue-100 bg-blue-50/40 p-2.5 text-[11px]">
+                    <p className="text-gray-600">
+                      追加为 V{activeAsset.versions.length + 1}，不覆盖旧版本与已锁定的商品母图。
+                    </p>
+                    <BatchAssetUpload
+                      key={activeAsset.id}
+                      singleFile
+                      className="space-y-2"
+                      compression={{ checked: compressVersionImage, onChange: setCompressVersionImage }}
+                      onBusyChange={setVersionUploading}
+                      onSubmit={handleAppendVersion}
+                      onError={setError}
+                      fields={(busy) => (
+                        <>
+                          <input
+                            type="text"
+                            disabled={busy}
+                            value={versionChangeNote}
+                            onChange={(e) => setVersionChangeNote(e.target.value)}
+                            placeholder="变更说明（如：调整高光、修复文字）"
+                            className="w-full rounded border border-gray-200 bg-white px-2 py-1 focus:border-blue-500 focus:outline-none"
+                          />
+                          <textarea
+                            rows={2}
+                            disabled={busy}
+                            value={versionPromptText}
+                            onChange={(e) => setVersionPromptText(e.target.value)}
+                            placeholder="提示词 / 生成参数（可选）"
+                            className="w-full rounded border border-gray-200 bg-white px-2 py-1 focus:border-blue-500 focus:outline-none"
+                          />
+                          <label className="flex cursor-pointer items-center gap-1.5 text-gray-700">
+                            <input
+                              type="checkbox"
+                              disabled={busy}
+                              checked={versionSetCurrent}
+                              onChange={(e) => setVersionSetCurrent(e.target.checked)}
+                              className="rounded border-gray-300"
                             />
-                          )}
-                        </div>
+                            <span>上传后设为当前展示版本</span>
+                          </label>
+                        </>
                       )}
-                      {versionFileError && (
-                        <p role="alert" className="text-rose-700">{versionFileError}</p>
-                      )}
-                      {versionUploading && versionUploadProgress && (
-                        <UploadTransferProgressPanel
-                          compact
-                          progress={versionUploadProgress}
-                          label="正在上传新版本…"
-                        />
-                      )}
-                      <input
-                        type="text"
-                        disabled={versionUploading}
-                        value={versionChangeNote}
-                        onChange={(e) => setVersionChangeNote(e.target.value)}
-                        placeholder="变更说明（如：调整高光、修复文字）"
-                        className="w-full rounded border border-gray-200 bg-white px-2 py-1 focus:border-blue-500 focus:outline-none"
-                      />
-                      <textarea
-                        rows={2}
-                        disabled={versionUploading}
-                        value={versionPromptText}
-                        onChange={(e) => setVersionPromptText(e.target.value)}
-                        placeholder="提示词 / 生成参数（可选）"
-                        className="w-full rounded border border-gray-200 bg-white px-2 py-1 focus:border-blue-500 focus:outline-none"
-                      />
-                      <label className="flex cursor-pointer items-center gap-1.5 text-gray-700">
-                        <input
-                          type="checkbox"
-                          disabled={versionUploading}
-                          checked={versionSetCurrent}
-                          onChange={(e) => setVersionSetCurrent(e.target.checked)}
-                          className="rounded border-gray-300"
-                        />
-                        <span>上传后设为当前展示版本</span>
-                      </label>
-                      <button
-                        type="button"
-                        disabled={
-                          !versionItem ||
-                          !!versionFileError ||
-                          versionUploading ||
-                          versionUploadPrep.summary.isCompressing
-                        }
-                        onClick={() => void handleAppendVersion()}
-                        className="w-full rounded-lg bg-blue-600 px-2.5 py-1.5 font-medium text-white hover:bg-blue-700 disabled:opacity-50"
-                      >
-                        {versionUploadPrep.summary.isCompressing
-                          ? "正在压缩图片…"
-                          : versionUploading
-                            ? versionUploadProgress?.phase === "processing"
-                              ? "服务器处理中…"
-                              : versionUploadProgress
-                                ? `上传新版本 ${versionUploadProgress.percent}%`
-                                : "正在上传新版本..."
-                            : "提交新版本"}
-                      </button>
-                    </div>
-                  );
-                })()}
+                    />
+                  </div>
+                )}
 
                 <div className="max-h-64 space-y-2 overflow-y-auto pr-0.5">
                   {activeAsset.versions.map((ver) => {
                     const isCurrent = ver.id === activeAsset.currentVersionId;
-                    const verReview = REVIEW_STATUS_META[ver.reviewStatus];
-                    const isReviewOpen = reviewingVersionId === ver.id;
                     const busy = versionActionBusyId === ver.id;
                     return (
                       <div
@@ -2032,11 +1815,6 @@ export function AssetsPage() {
                                 当前
                               </span>
                             )}
-                            <span
-                              className={`rounded border px-1.5 py-0.5 text-[10px] font-medium ${verReview.className}`}
-                            >
-                              {verReview.label}
-                            </span>
                           </div>
                           <span className="font-mono-tabular text-[10px] text-gray-400">
                             {formatBytes(ver.sizeBytes)}
@@ -2060,9 +1838,6 @@ export function AssetsPage() {
                         {ver.changeNote && (
                           <p className="mt-1 text-gray-700">说明：{ver.changeNote}</p>
                         )}
-                        {ver.reviewNote && (
-                          <p className="mt-0.5 text-gray-500">审核意见：{ver.reviewNote}</p>
-                        )}
 
                         <div className="mt-2 flex flex-wrap items-center gap-1.5 border-t border-gray-200/70 pt-2">
                           {!isCurrent && (
@@ -2075,20 +1850,6 @@ export function AssetsPage() {
                               设为当前
                             </button>
                           )}
-                          <button
-                            type="button"
-                            onClick={() => {
-                              if (isReviewOpen) {
-                                setReviewingVersionId(null);
-                              } else {
-                                setReviewingVersionId(ver.id);
-                                setVersionReviewNote(ver.reviewNote || "");
-                              }
-                            }}
-                            className="rounded border border-gray-200 bg-white px-2 py-0.5 text-[11px] font-medium text-gray-700 transition-colors hover:bg-gray-100"
-                          >
-                            {isReviewOpen ? "取消审核" : "独立审核"}
-                          </button>
                           <a
                             href={api.contentUrl(activeAsset.id, ver.id)}
                             className="ml-auto rounded border border-gray-200 bg-white px-2 py-0.5 text-[11px] font-medium text-gray-600 transition-colors hover:bg-gray-100 hover:text-gray-900"
@@ -2096,44 +1857,6 @@ export function AssetsPage() {
                             下载
                           </a>
                         </div>
-
-                        {isReviewOpen && (
-                          <div className="mt-2 space-y-1.5 border-t border-gray-200 pt-2">
-                            <input
-                              type="text"
-                              value={versionReviewNote}
-                              onChange={(e) => setVersionReviewNote(e.target.value)}
-                              placeholder="输入本版本审核意见（可选）"
-                              className="w-full rounded border border-gray-200 bg-white px-2 py-1 focus:border-blue-500 focus:outline-none"
-                            />
-                            <div className="flex items-center gap-1.5">
-                              <button
-                                type="button"
-                                disabled={busy}
-                                onClick={() => void handleReviewVersion(ver.id, "approved")}
-                                className="flex-1 rounded bg-emerald-600 py-1 font-medium text-white hover:bg-emerald-700 disabled:opacity-50"
-                              >
-                                通过
-                              </button>
-                              <button
-                                type="button"
-                                disabled={busy}
-                                onClick={() => void handleReviewVersion(ver.id, "rejected")}
-                                className="flex-1 rounded bg-rose-600 py-1 font-medium text-white hover:bg-rose-700 disabled:opacity-50"
-                              >
-                                拒绝
-                              </button>
-                              <button
-                                type="button"
-                                disabled={busy}
-                                onClick={() => void handleReviewVersion(ver.id, "pending")}
-                                className="flex-1 rounded border border-gray-200 bg-white py-1 font-medium text-gray-700 hover:bg-gray-100 disabled:opacity-50"
-                              >
-                                待审
-                              </button>
-                            </div>
-                          </div>
-                        )}
                       </div>
                     );
                   })}
@@ -2174,9 +1897,9 @@ export function AssetsPage() {
                       className="w-full rounded-lg border border-gray-200 bg-white px-2 py-1.5 focus:border-blue-500 focus:outline-none"
                     >
                       <option value="">未归类</option>
-                      {folders.map((f) => (
-                        <option key={f.id} value={f.id}>
-                          {f.name}
+                      {folderTree.flatNodes.map((node) => (
+                        <option key={node.folder.id} value={node.folder.id} title={node.pathLabel}>
+                          {formatFolderSelectOption(node)}
                         </option>
                       ))}
                     </select>
@@ -2302,199 +2025,89 @@ export function AssetsPage() {
         )}
       </div>
 
-      {/* Upload Modal */}
       {uploadModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-          <div className="w-full max-w-lg rounded-xl border border-gray-200 bg-white shadow-xl">
-            <div className="flex items-center justify-between border-b border-gray-200 px-5 py-3.5">
-              <h2 className="text-sm font-semibold text-gray-900">批量上传素材</h2>
-              <button
-                type="button"
-                disabled={uploading}
-                onClick={closeUploadModal}
-                className="rounded p-1 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
-              >
-                <X className="h-4 w-4" />
-              </button>
-            </div>
-
-            <div className="space-y-3.5 p-5 text-xs">
-              <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
-                <div>
-                  <label className="mb-1 block font-medium text-gray-700">关联商品（选填）</label>
-                  <select
-                    disabled={uploading}
-                    value={uploadTargetProductId}
-                    onChange={(e) => setUploadTargetProductId(e.target.value)}
-                    className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-2 focus:border-blue-500 focus:outline-none"
-                  >
-                    <option value="">暂不关联商品</option>
-                    {products.map((p) => (
-                      <option key={p.id} value={p.id}>
-                        {p.spu} · {p.nameZh}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="mb-1 block font-medium text-gray-700">目标文件夹</label>
-                  <select
-                    disabled={uploading}
-                    value={uploadTargetFolderId}
-                    onChange={(e) => setUploadTargetFolderId(e.target.value)}
-                    className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-2 focus:border-blue-500 focus:outline-none"
-                  >
-                    <option value="">未归类</option>
-                    {folders.map((f) => (
-                      <option key={f.id} value={f.id}>
-                        {f.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="mb-1 block font-medium text-gray-700">默认用途</label>
-                  <select
-                    disabled={uploading}
-                    value={uploadTargetPurpose}
-                    onChange={(e) => setUploadTargetPurpose(e.target.value)}
-                    className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-2 focus:border-blue-500 focus:outline-none"
-                  >
-                    {ASSET_PURPOSES.map((p) => (
-                      <option key={p.value} value={p.value}>
-                        {p.label}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="mb-1 block font-medium text-gray-700">目标存储空间</label>
-                  <select
-                    disabled={uploading}
-                    value={uploadTargetStorageId}
-                    onChange={(e) => setUploadTargetStorageId(e.target.value)}
-                    className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-2 focus:border-blue-500 focus:outline-none"
-                  >
-                    <option value="">使用系统默认存储</option>
-                    {storages
-                      .filter((s) => s.enabled)
-                      .map((s) => (
-                        <option key={s.id} value={s.id}>
-                          {s.name} ({s.type.toUpperCase()})
-                        </option>
-                      ))}
-                  </select>
-                </div>
+        <BatchAssetUpload
+          dialogTitle="批量上传素材"
+          compression={{ checked: compressUploadImages, onChange: setCompressUploadImages }}
+          onBusyChange={setUploading}
+          onClose={() => setUploadModalOpen(false)}
+          onSubmit={(files, options) => performUpload(files, {
+            ...options,
+            productId: uploadTargetProductId || undefined,
+            folderId: uploadTargetFolderId || undefined,
+            purpose: uploadTargetPurpose || undefined,
+            storageId: uploadTargetStorageId || undefined
+          }, true)}
+          fields={(busy) => (
+            <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <div>
+                <label className="mb-1 block font-medium text-gray-700">关联商品（选填）</label>
+                <select
+                  disabled={busy}
+                  value={uploadTargetProductId}
+                  onChange={(e) => setUploadTargetProductId(e.target.value)}
+                  className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-2 focus:border-blue-500 focus:outline-none"
+                >
+                  <option value="">暂不关联商品</option>
+                  {products.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.spu} · {p.nameZh}
+                    </option>
+                  ))}
+                </select>
               </div>
-
-              <div className="space-y-2">
-                <ImageCompressionSwitch
-                  checked={compressUploadImages}
-                  onChange={setCompressUploadImages}
-                  disabled={uploading}
-                />
-                <FileDropButton
-                  multiple
-                  disabled={uploading}
-                  onFiles={(files) => {
-                    if (uploadInFlight.current) return;
-                    modalUploadPrep.addFiles(files);
-                    setUploadModalError(null);
-                  }}
-                  className="flex flex-col items-center justify-center px-4 py-6"
+              <div>
+                <label className="mb-1 block font-medium text-gray-700">目标文件夹</label>
+                <select
+                  disabled={busy}
+                  value={uploadTargetFolderId}
+                  onChange={(e) => setUploadTargetFolderId(e.target.value)}
+                  className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-2 focus:border-blue-500 focus:outline-none"
                 >
-                  <Upload className="h-6 w-6 text-gray-400" />
-                  <span className="mt-1.5 font-medium text-gray-700">拖入文件，或点击选择</span>
-                  <span className="mt-0.5 text-[11px] text-gray-400">
-                    支持多文件批量上传，相同底层文件自动基于 SHA-256 去重
-                  </span>
-                </FileDropButton>
-                {uploadModalError && (
-                  <p role="alert" className="mt-2 text-rose-700">{uploadModalError}</p>
-                )}
-                {compressUploadImages && modalUploadPrep.summary.compressibleCount > 0 && (
-                  <CompressionProgressPanel
-                    completed={modalUploadPrep.summary.completedCount}
-                    total={modalUploadPrep.summary.compressibleCount}
-                    percent={modalUploadPrep.summary.percent}
-                    isCompressing={modalUploadPrep.summary.isCompressing}
-                    originalBytes={modalUploadPrep.summary.originalBytes}
-                    compressedBytes={modalUploadPrep.summary.compressedBytes}
-                    savedBytes={modalUploadPrep.summary.savedBytes}
-                    savedPercent={modalUploadPrep.summary.savedPercent}
-                    unchangedImages={modalUploadPrep.summary.unchangedImages}
-                  />
-                )}
-                <PreparedUploadList
-                  items={modalUploadPrep.items}
-                  compressEnabled={compressUploadImages}
-                  disabled={uploading}
-                  onRemove={modalUploadPrep.removeFile}
-                />
-                {uploading && modalUploadProgress && (
-                  <UploadTransferProgressPanel
-                    progress={modalUploadProgress}
-                    label="正在上传素材…"
-                  />
-                )}
+                  <option value="">未归类</option>
+                  {folderTree.flatNodes.map((node) => (
+                    <option key={node.folder.id} value={node.folder.id} title={node.pathLabel}>
+                      {formatFolderSelectOption(node)}
+                    </option>
+                  ))}
+                </select>
               </div>
-
-              <div className="flex justify-end gap-2 border-t border-gray-100 pt-3">
-                {modalUploadPrep.items.length > 0 && (
-                  <button
-                    type="button"
-                    disabled={uploading}
-                    onClick={modalUploadPrep.clear}
-                    className="mr-auto rounded-lg border border-gray-200 px-3 py-2 font-medium text-gray-600 hover:bg-gray-50 disabled:opacity-50"
-                  >
-                    清空队列
-                  </button>
-                )}
-                <button
-                  type="button"
-                  disabled={uploading}
-                  onClick={closeUploadModal}
-                  className="rounded-lg border border-gray-200 px-3.5 py-2 font-medium text-gray-700 hover:bg-gray-50"
+              <div>
+                <label className="mb-1 block font-medium text-gray-700">默认用途</label>
+                <select
+                  disabled={busy}
+                  value={uploadTargetPurpose}
+                  onChange={(e) => setUploadTargetPurpose(e.target.value)}
+                  className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-2 focus:border-blue-500 focus:outline-none"
                 >
-                  取消
-                </button>
-                <button
-                  type="button"
-                  disabled={
-                    uploading ||
-                    modalUploadPrep.items.length === 0 ||
-                    modalUploadPrep.summary.isCompressing
-                  }
-                  onClick={() =>
-                    void performUpload(
-                      modalUploadPrep.items.map((item) => item.originalFile),
-                      {
-                        source: "modal",
-                        productId: uploadTargetProductId || undefined,
-                        folderId: uploadTargetFolderId || undefined,
-                        purpose: uploadTargetPurpose || undefined,
-                        storageId: uploadTargetStorageId || undefined,
-                        preparedFiles: modalUploadPrep.preparedFiles,
-                        compressionSummary: modalUploadPrep.summary.compressionSummary
-                      }
-                    )
-                  }
-                  className="rounded-lg bg-blue-600 px-4 py-2 font-medium text-white hover:bg-blue-700 disabled:opacity-50"
+                  {ASSET_PURPOSES.map((p) => (
+                    <option key={p.value} value={p.value}>
+                      {p.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="mb-1 block font-medium text-gray-700">目标存储空间</label>
+                <select
+                  disabled={busy}
+                  value={uploadTargetStorageId}
+                  onChange={(e) => setUploadTargetStorageId(e.target.value)}
+                  className="w-full rounded-lg border border-gray-200 bg-white px-2.5 py-2 focus:border-blue-500 focus:outline-none"
                 >
-                  {modalUploadPrep.summary.isCompressing
-                    ? `正在压缩 (${modalUploadPrep.summary.completedCount}/${modalUploadPrep.summary.compressibleCount})…`
-                    : uploading
-                      ? modalUploadProgress?.phase === "processing"
-                        ? "服务器处理中…"
-                        : modalUploadProgress
-                          ? `上传中 ${modalUploadProgress.percent}%`
-                          : "上传中..."
-                      : `开始上传 (${modalUploadPrep.items.length})`}
-                </button>
+                  <option value="">使用系统默认存储</option>
+                  {storages
+                    .filter((s) => s.enabled)
+                    .map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name} ({s.type.toUpperCase()})
+                      </option>
+                    ))}
+                </select>
               </div>
             </div>
-          </div>
-        </div>
+          )}
+        />
       )}
 
       {lightboxIndex !== null && items[lightboxIndex] && (

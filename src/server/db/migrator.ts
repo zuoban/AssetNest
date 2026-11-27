@@ -1,6 +1,7 @@
 import crypto from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
+import { rebuildAssetSearchDocument } from "../modules/search/service.js";
 import type { AppDatabase } from "./database.js";
 
 export interface AppliedMigration {
@@ -69,6 +70,14 @@ export function runMigrations(
     const appliedAt = new Date().toISOString();
     db.transaction(() => {
       db.raw.exec(migration.sql);
+      if (migration.name === "0007_remove_image_review_indexes.sql") {
+        const affectedAssets = db.raw
+          .prepare("SELECT DISTINCT asset_id FROM asset_versions WHERE review_note <> ''")
+          .all() as Array<{ asset_id: string }>;
+        for (const { asset_id } of affectedAssets) {
+          rebuildAssetSearchDocument(db, asset_id);
+        }
+      }
       db.raw
         .prepare(
           "INSERT INTO schema_migrations (version, name, checksum, applied_at) VALUES (?, ?, ?, ?)"

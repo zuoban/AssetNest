@@ -30,6 +30,20 @@ function isUniqueError(err: unknown): boolean {
   return err instanceof Error && err.message.toUpperCase().includes("UNIQUE");
 }
 
+export function getFolderSubtreeIds(db: AppDatabase, folderId: string): string[] {
+  const rows = db.raw
+    .prepare(
+      `WITH RECURSIVE subtree(id) AS (
+         SELECT id FROM folders WHERE id = ?
+         UNION ALL
+         SELECT f.id FROM folders f JOIN subtree s ON f.parent_id = s.id
+       )
+       SELECT id FROM subtree`
+    )
+    .all(folderId) as Array<{ id: string }>;
+  return rows.map((row) => row.id);
+}
+
 export function listFolders(db: AppDatabase): FolderRecord[] {
   const rows = db.raw
     .prepare(
@@ -154,9 +168,15 @@ export function updateFolder(
           folderId
         );
 
-      const linkedAssets = db.raw
-        .prepare("SELECT id FROM assets WHERE folder_id = ? AND deleted_at IS NULL")
-        .all(folderId) as Array<{ id: string }>;
+      const subtreeIds = getFolderSubtreeIds(db, folderId);
+      const linkedAssets =
+        subtreeIds.length > 0
+          ? (db.raw
+              .prepare(
+                `SELECT id FROM assets WHERE folder_id IN (${subtreeIds.map(() => "?").join(", ")}) AND deleted_at IS NULL`
+              )
+              .all(...subtreeIds) as Array<{ id: string }>)
+          : [];
       for (const item of linkedAssets) {
         rebuildAssetSearchDocument(db, item.id);
       }
@@ -182,8 +202,9 @@ export function updateFolder(
 export function deleteFolder(
   db: AppDatabase,
   actorUserId: string,
-  folderId: string
-): { deleted: boolean; id: string } {
+  folderId: string,
+  options: { recursive?: boolean } = {}
+): { deleted: boolean; id: string; deletedIds: string[] } {
   const existing = db.raw
     .prepare("SELECT id, name FROM folders WHERE id = ?")
     .get(folderId) as { id: string; name: string } | undefined;
@@ -192,21 +213,36 @@ export function deleteFolder(
     throw new AppError(404, "NOT_FOUND", "目录不存在");
   }
 
-  const childCount = (
-    db.raw.prepare("SELECT COUNT(*) AS count FROM folders WHERE parent_id = ?").get(folderId) as {
-      count: number;
-    }
-  ).count;
+  const subtreeRows = db.raw
+    .prepare(
+      `WITH RECURSIVE subtree(id, depth) AS (
+         SELECT id, 0 FROM folders WHERE id = ?
+         UNION ALL
+         SELECT f.id, s.depth + 1 FROM folders f JOIN subtree s ON f.parent_id = s.id
+       )
+       SELECT id, depth FROM subtree ORDER BY depth DESC`
+    )
+    .all(folderId) as Array<{ id: string; depth: number }>;
 
-  if (childCount > 0) {
+  if (subtreeRows.length > 1 && !options.recursive) {
     throw new AppError(409, "CONFLICT", "该目录下仍存在子目录，请先移除或删除子目录");
   }
 
+  const deletedIds = subtreeRows.map((row) => row.id);
+
   db.transaction(() => {
-    const affectedAssets = db.raw
-      .prepare("SELECT id FROM assets WHERE folder_id = ?")
-      .all(folderId) as Array<{ id: string }>;
-    db.raw.prepare("DELETE FROM folders WHERE id = ?").run(folderId);
+    const affectedAssets =
+      deletedIds.length > 0
+        ? (db.raw
+            .prepare(
+              `SELECT id FROM assets WHERE folder_id IN (${deletedIds.map(() => "?").join(", ")})`
+            )
+            .all(...deletedIds) as Array<{ id: string }>)
+        : [];
+    const deleteStmt = db.raw.prepare("DELETE FROM folders WHERE id = ?");
+    for (const row of subtreeRows) {
+      deleteStmt.run(row.id);
+    }
     for (const item of affectedAssets) {
       rebuildAssetSearchDocument(db, item.id);
     }
@@ -215,11 +251,15 @@ export function deleteFolder(
       action: "folder.delete",
       objectType: "folder",
       objectId: folderId,
-      details: { name: existing.name }
+      details: {
+        name: existing.name,
+        recursive: Boolean(options.recursive),
+        deletedCount: deletedIds.length
+      }
     });
   });
 
-  return { deleted: true, id: folderId };
+  return { deleted: true, id: folderId, deletedIds };
 }
 
 export function listTags(db: AppDatabase, dimension?: TagDimension): TagRecord[] {

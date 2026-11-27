@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Link, useNavigate, useParams } from "react-router-dom";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Link, useNavigate, useParams, useSearchParams } from "react-router-dom";
 import {
   closestCenter,
   DndContext,
@@ -58,17 +58,31 @@ import type {
   ProductDetail,
   StoreRecord
 } from "../../shared/types";
-import { api } from "../api/client";
+import { api, ApiClientError } from "../api/client";
 import { ConfirmDialog, type ConfirmDialogState } from "../components/ConfirmDialog";
+import { useFileDrop } from "../components/FileDropButton";
+import { BatchAssetUpload } from "../components/BatchAssetUpload";
+import { isUsableSkuImage, mergeUploadBatch, reuseSkuImages, setItemInput, type SetItemInput } from "../components/listingWorkbenchAssetSets";
 import { ListingReleasePanel } from "../components/ListingReleasePanel";
 import {
   countCodePoints,
   formatAspectRatio,
   formatBytes,
   formatDateTime,
-  LISTING_STATUS_META,
-  REVIEW_STATUS_META
+  LISTING_STATUS_META
 } from "../utils/format";
+
+const PICKER_PAGE_SIZE = 24;
+const ASSET_GROUP_LABELS: Record<AssetSetKind, string> = {
+  carousel: "轮播图组", detail: "详情图组", sku: "SKU 图组", video: "视频组"
+};
+type AssetTarget = { kind: AssetSetKind; assetVersionId?: string; listingSkuId?: string };
+
+function findReplacementTarget(items: AssetSetItemRecord[], original: AssetSetItemRecord) {
+  const sameVersion = items.filter((item) => item.assetVersionId === original.assetVersionId);
+  return items.find((item) => item.id === original.id)
+    ?? (sameVersion.length === 1 && !original.isDuplicateVersion ? sameVersion[0] : undefined);
+}
 
 type WorkbenchTab = "assets" | "skus" | "pdp" | "release";
 
@@ -76,6 +90,9 @@ interface SortableCardProps {
   item: AssetSetItemRecord;
   index: number;
   isMainSlot: boolean;
+  highlighted: boolean;
+  onSetMain: () => void;
+  onReplace: () => void;
   onRemove: (id: string) => void;
   onUpgrade: (id: string) => void;
 }
@@ -84,6 +101,9 @@ function SortableCarouselCard({
   item,
   index,
   isMainSlot,
+  highlighted,
+  onSetMain,
+  onReplace,
   onRemove,
   onUpgrade
 }: SortableCardProps) {
@@ -95,13 +115,14 @@ function SortableCarouselCard({
     transition,
     opacity: isDragging ? 0.6 : 1
   };
-  const reviewMeta = REVIEW_STATUS_META[item.reviewStatus];
 
   return (
     <div
       ref={setNodeRef}
       style={style}
-      className="group flex flex-col overflow-hidden rounded-xl border border-gray-200 bg-white shadow-xs"
+      tabIndex={highlighted ? -1 : undefined}
+      data-workbench-target={highlighted || undefined}
+      className={`group flex flex-col overflow-hidden rounded-xl border bg-white shadow-xs ${highlighted ? "border-amber-500 ring-2 ring-amber-400" : "border-gray-200"}`}
     >
       <div className="relative aspect-square bg-gray-100">
         <img
@@ -130,7 +151,8 @@ function SortableCarouselCard({
         <button
           type="button"
           onClick={() => onRemove(item.id)}
-          title="从当前素材组移除"
+          title="从当前链接移除"
+          aria-label={`从当前链接移除 ${item.assetName}`}
           className="absolute top-2 right-2 rounded-md bg-white/90 p-1 text-rose-600 shadow-xs hover:bg-rose-50"
         >
           <Trash2 className="h-3.5 w-3.5" />
@@ -138,11 +160,6 @@ function SortableCarouselCard({
         <div className="absolute right-2 bottom-2 left-2 flex flex-wrap items-center justify-between gap-1">
           <span className="rounded bg-gray-900/75 px-1.5 py-0.5 font-mono-tabular text-[10px] text-white">
             V{item.versionNo}
-          </span>
-          <span
-            className={`rounded border px-1.5 py-0.5 text-[10px] font-medium ${reviewMeta.className}`}
-          >
-            {reviewMeta.label}
           </span>
         </div>
       </div>
@@ -162,6 +179,10 @@ function SortableCarouselCard({
         </div>
 
         <div className="mt-2 space-y-1">
+          <div className="flex flex-wrap gap-x-2 text-blue-700">
+            {!isMainSlot && <button type="button" onClick={onSetMain} className="hover:underline">设为主图</button>}
+            <button type="button" onClick={onReplace} className="hover:underline">原位替换</button>
+          </div>
           {(item.isDuplicateVersion || item.isDuplicateAsset) && (
             <div className="flex items-center gap-1 rounded bg-amber-50 px-1.5 py-0.5 text-[10px] text-amber-800">
               <AlertTriangle className="h-3 w-3 shrink-0" />
@@ -187,11 +208,15 @@ function SortableCarouselCard({
 interface SortableRowProps {
   item: AssetSetItemRecord;
   index: number;
+  highlighted: boolean;
+  previewSelected?: boolean;
+  onPreview?: () => void;
+  onReplace: () => void;
   onRemove: (id: string) => void;
   onUpgrade: (id: string) => void;
 }
 
-function SortableLinearRow({ item, index, onRemove, onUpgrade }: SortableRowProps) {
+function SortableLinearRow({ item, index, highlighted, previewSelected, onPreview, onReplace, onRemove, onUpgrade }: SortableRowProps) {
   const { attributes, listeners, setNodeRef, transform, transition, isDragging } = useSortable({
     id: item.id
   });
@@ -200,13 +225,14 @@ function SortableLinearRow({ item, index, onRemove, onUpgrade }: SortableRowProp
     transition,
     opacity: isDragging ? 0.6 : 1
   };
-  const reviewMeta = REVIEW_STATUS_META[item.reviewStatus];
 
   return (
     <div
       ref={setNodeRef}
       style={style}
-      className="flex items-center gap-3 rounded-xl border border-gray-200 bg-white p-2.5 text-xs"
+      tabIndex={highlighted ? -1 : undefined}
+      data-workbench-target={highlighted || undefined}
+      className={`flex flex-wrap items-center gap-3 rounded-xl border bg-white p-2.5 text-xs ${highlighted ? "border-amber-500 ring-2 ring-amber-400" : previewSelected ? "border-blue-500" : "border-gray-200"}`}
     >
       <button
         type="button"
@@ -219,24 +245,23 @@ function SortableLinearRow({ item, index, onRemove, onUpgrade }: SortableRowProp
         <span className="font-mono-tabular font-medium">#{index + 1}</span>
       </button>
 
-      <div className="h-14 w-14 shrink-0 overflow-hidden rounded-lg border border-gray-200 bg-gray-50">
-        <img
-          src={api.thumbnailUrl(item.assetId, item.assetVersionId)}
-          alt={item.assetName}
-          className="h-full w-full object-contain"
-        />
-      </div>
+      <button
+        type="button"
+        disabled={!onPreview}
+        onClick={onPreview}
+        aria-label={onPreview ? `在详情预览中定位 ${item.assetName}` : item.assetName}
+        className="h-14 w-14 shrink-0 overflow-hidden rounded-lg border border-gray-200 bg-gray-50 enabled:hover:border-blue-500"
+      >
+        <img src={api.thumbnailUrl(item.assetId, item.assetVersionId)} alt={item.assetName} className="h-full w-full object-contain" />
+      </button>
 
       <div className="min-w-0 flex-1">
         <div className="flex flex-wrap items-center gap-1.5">
-          <span className="truncate font-medium text-gray-900">{item.assetName}</span>
+          {onPreview ? (
+            <button type="button" onClick={onPreview} className="truncate font-medium text-blue-700 hover:underline">{item.assetName}</button>
+          ) : <span className="truncate font-medium text-gray-900">{item.assetName}</span>}
           <span className="rounded bg-gray-100 px-1.5 py-0.5 font-mono-tabular text-[10px] text-gray-700">
             V{item.versionNo}
-          </span>
-          <span
-            className={`rounded border px-1.5 py-0.5 text-[10px] font-medium ${reviewMeta.className}`}
-          >
-            {reviewMeta.label}
           </span>
           {(item.isDuplicateVersion || item.isDuplicateAsset) && (
             <span className="inline-flex items-center gap-0.5 rounded bg-amber-50 px-1.5 py-0.5 text-[10px] text-amber-800">
@@ -265,6 +290,7 @@ function SortableLinearRow({ item, index, onRemove, onUpgrade }: SortableRowProp
       </div>
 
       <div className="flex shrink-0 items-center gap-1.5">
+        <button type="button" onClick={onReplace} className="rounded-md border border-blue-200 px-2 py-1 text-[11px] text-blue-700 hover:bg-blue-50">原位替换</button>
         {item.hasNewerVersion && (
           <button
             type="button"
@@ -278,6 +304,8 @@ function SortableLinearRow({ item, index, onRemove, onUpgrade }: SortableRowProp
         <button
           type="button"
           onClick={() => onRemove(item.id)}
+          title="从当前链接移除"
+          aria-label={`从当前链接移除 ${item.assetName}`}
           className="rounded-md border border-rose-200 p-1.5 text-rose-600 hover:bg-rose-50"
         >
           <Trash2 className="h-3.5 w-3.5" />
@@ -303,7 +331,14 @@ function emptyPdp(): PdpContent {
 
 export function ListingWorkbenchPage() {
   const { id } = useParams<{ id: string }>();
+  return <ListingWorkbench key={id} id={id} />;
+}
+
+function ListingWorkbench({ id }: { id?: string }) {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const routeGroup = searchParams.get("assetGroup");
+  const routeMissingSku = searchParams.get("missingSku") === "1";
 
   const [activeTab, setActiveTab] = useState<WorkbenchTab>("assets");
   const [activeSetKind, setActiveSetKind] = useState<AssetSetKind>("carousel");
@@ -333,17 +368,30 @@ export function ListingWorkbenchPage() {
 
   // Asset set saving state
   const [savingSet, setSavingSet] = useState(false);
+  const writeLock = useRef(false);
+  const [upload, setUpload] = useState<{ kind: "carousel" | "detail"; initialFiles?: File[]; batchVersions: Set<string> } | null>(null);
+  const [selectedSkuIds, setSelectedSkuIds] = useState<string[]>([]);
+  const [missingSkuOnly, setMissingSkuOnly] = useState(false);
+  const [fixTarget, setFixTarget] = useState<AssetTarget | null>(null);
+  const [detailPreviewId, setDetailPreviewId] = useState<string | null>(null);
+  const detailPreviewRef = useRef<HTMLDivElement>(null);
   const [mobilePreviewWidth, setMobilePreviewWidth] = useState(true);
 
   // Asset Picker Modal (also supports SKU target and cross-listing reuse)
   const [pickerOpen, setPickerOpen] = useState(false);
   const [pickerKind, setPickerKind] = useState<AssetSetKind>("carousel");
-  const [pickerSkuTarget, setPickerSkuTarget] = useState<string | null>(null);
+  const [pickerSkuTargets, setPickerSkuTargets] = useState<string[]>([]);
+  const [pickerReplaceItem, setPickerReplaceItem] = useState<AssetSetItemRecord | null>(null);
+  const [pickerSelected, setPickerSelected] = useState<Array<{ id: string; name: string }>>([]);
+  const [pickerPage, setPickerPage] = useState(1);
+  const [pickerTotal, setPickerTotal] = useState(0);
+  const [pickerError, setPickerError] = useState<string | null>(null);
   const [pickerSourceTab, setPickerSourceTab] = useState<"product" | "all" | "sibling">("product");
   const [pickerQuery, setPickerQuery] = useState("");
   const [pickerAssets, setPickerAssets] = useState<AssetListItem[]>([]);
   const [pickerSiblingId, setPickerSiblingId] = useState("");
   const [pickerSiblingSets, setPickerSiblingSets] = useState<ListingAssetSetsResponse | null>(null);
+  const [pickerSibling, setPickerSibling] = useState<ListingDetail | null>(null);
   const [pickerLoading, setPickerLoading] = useState(false);
 
   // SKU Binding Editor State
@@ -440,6 +488,58 @@ export function ListingWorkbenchPage() {
     void loadAll();
   }, [loadAll]);
 
+  useEffect(() => {
+    const group = routeGroup === "carousel" || routeGroup === "detail" || routeGroup === "sku" || routeGroup === "video"
+      ? routeGroup
+      : routeMissingSku ? "sku" : null;
+    setMissingSkuOnly(group === "sku" && routeMissingSku);
+    if (group) {
+      setActiveTab("assets");
+      setActiveSetKind(group);
+      setFixTarget(null);
+    }
+  }, [routeGroup, routeMissingSku]);
+
+  useEffect(() => {
+    if (!fixTarget || activeTab !== "assets" || activeSetKind !== fixTarget.kind) return;
+    const frame = requestAnimationFrame(() => {
+      const target = document.querySelector<HTMLElement>('[data-workbench-target="true"]')
+        ?? document.getElementById(`workbench-group-${fixTarget.kind}`);
+      target?.scrollIntoView({ block: "nearest" });
+      target?.focus({ preventScroll: true });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [fixTarget, activeTab, activeSetKind, assetSets]);
+
+  const jumpToDetailPreview = useCallback((itemId: string, focus = true) => {
+    setDetailPreviewId(itemId);
+    const preview = detailPreviewRef.current;
+    const image = document.getElementById(`workbench-preview-${itemId}`);
+    if (preview && image) {
+      preview.scrollTop += image.getBoundingClientRect().top - preview.getBoundingClientRect().top;
+      if (focus) {
+        preview.scrollIntoView({ block: "nearest" });
+        preview.focus({ preventScroll: true });
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    if (detailPreviewId && activeTab === "assets" && activeSetKind === "detail") {
+      jumpToDetailPreview(detailPreviewId, false);
+    }
+  }, [detailPreviewId, activeTab, activeSetKind, jumpToDetailPreview]);
+
+  const handleFixAsset = (target: AssetTarget) => {
+    setActiveTab("assets");
+    setActiveSetKind(target.kind);
+    setMissingSkuOnly(target.kind === "sku" && !target.listingSkuId && !target.assetVersionId);
+    setFixTarget(target);
+    if (target.kind === "detail" && target.assetVersionId) {
+      setDetailPreviewId(assetSets?.sets.detail.items.find((item) => item.assetVersionId === target.assetVersionId)?.id ?? null);
+    }
+  };
+
   const labelOf = (category: "platform" | "market" | "language", code: string): string => {
     const list =
       category === "platform"
@@ -488,181 +588,305 @@ export function ListingWorkbenchPage() {
     }
   };
 
-  const persistSetItems = async (
+  const writeSet = async (
     kind: AssetSetKind,
-    items: Array<{ assetVersionId: string; listingSkuId?: string | null }>,
+    buildItems: (current: AssetSetItemRecord[]) => SetItemInput[],
     successMsg: string
   ) => {
-    if (!id) return;
+    if (!id || writeLock.current) throw new Error("素材或 SKU 映射正在保存，请稍后重试");
+    writeLock.current = true;
     setSavingSet(true);
     setError(null);
     try {
-      const updated = await api.replaceListingAssetSet(id, kind, items);
-      setAssetSets(updated);
+      const latest = await api.getListingAssetSets(id);
+      setAssetSets(latest);
+      const current = latest.sets[kind].items;
+      const next = buildItems(current);
+      if (next.length > 200) throw new Error("每个素材组最多可保存 200 项");
+      const unchanged = current.length === next.length && current.every((item, index) =>
+        item.assetVersionId === next[index]?.assetVersionId && item.listingSkuId === next[index]?.listingSkuId
+      );
+      if (!unchanged) {
+        setAssetSets(await api.replaceListingAssetSet(id, kind, next, current.map((item) => item.id)));
+      }
       flashNotice(successMsg);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "保存素材组失败");
+    } catch (error) {
+      if (error instanceof ApiClientError && error.status === 409) {
+        const refreshed = await api.getListingAssetSets(id).catch(() => null);
+        if (refreshed) setAssetSets(refreshed);
+      }
+      throw error;
     } finally {
+      writeLock.current = false;
       setSavingSet(false);
     }
   };
 
-  const currentSetItems = useMemo(() => {
-    if (!assetSets) return [];
-    return assetSets.sets[activeSetKind].items;
-  }, [assetSets, activeSetKind]);
+  const saveSet = async (...args: Parameters<typeof writeSet>) => {
+    try {
+      await writeSet(...args);
+      return true;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "保存素材组失败");
+      return false;
+    }
+  };
 
-  const handleDragEnd = (event: DragEndEvent) => {
-    const { active, over } = event;
-    if (!over || active.id === over.id || !assetSets) return;
-    const items = assetSets.sets[activeSetKind].items;
-    const oldIndex = items.findIndex((item) => item.id === active.id);
-    const newIndex = items.findIndex((item) => item.id === over.id);
-    if (oldIndex < 0 || newIndex < 0) return;
-    const reordered = arrayMove(items, oldIndex, newIndex);
-    setAssetSets({
-      ...assetSets,
-      sets: {
-        ...assetSets.sets,
-        [activeSetKind]: {
-          ...assetSets.sets[activeSetKind],
-          items: reordered.map((it, idx) => ({ ...it, position: idx }))
-        }
-      }
-    });
-    void persistSetItems(
-      activeSetKind,
-      reordered.map((it) => ({
-        assetVersionId: it.assetVersionId,
-        listingSkuId: it.listingSkuId
-      })),
-      "已更新素材组排序"
-    );
+  const currentSetItems = useMemo(() => assetSets?.sets[activeSetKind].items ?? [], [assetSets, activeSetKind]);
+
+  const editSetItem = (
+    kind: AssetSetKind,
+    itemId: string,
+    edit: (items: AssetSetItemRecord[], index: number) => SetItemInput[],
+    message: string
+  ) => saveSet(kind, (items) => {
+    const index = items.findIndex((item) => item.id === itemId);
+    if (index < 0) throw new Error("素材组已更新，请确认当前内容后重试");
+    return edit(items, index);
+  }, message);
+
+  const handleDragEnd = ({ active, over }: DragEndEvent) => {
+    if (!over || active.id === over.id || writeLock.current) return;
+    void editSetItem(activeSetKind, String(active.id), (items, index) => {
+      const destination = items.findIndex((item) => item.id === over.id);
+      if (destination < 0) throw new Error("素材组已更新，请重新排序");
+      return arrayMove(items, index, destination).map(setItemInput);
+    }, "已更新素材组排序");
   };
 
   const handleRemoveSetItem = (kind: AssetSetKind, itemId: string) => {
-    if (!assetSets) return;
-    const remaining = assetSets.sets[kind].items.filter((it) => it.id !== itemId);
-    void persistSetItems(
-      kind,
-      remaining.map((it) => ({
-        assetVersionId: it.assetVersionId,
-        listingSkuId: it.listingSkuId
-      })),
-      "已从素材组移除该条目"
-    );
+    void editSetItem(kind, itemId, (items, index) => items.filter((_, i) => i !== index).map(setItemInput), "已从当前链接移除图片或视频引用");
   };
 
   const handleUpgradeSetItem = (kind: AssetSetKind, itemId: string) => {
-    if (!assetSets) return;
-    const updatedList = assetSets.sets[kind].items.map((it) => ({
-      assetVersionId: it.id === itemId ? it.latestVersionId : it.assetVersionId,
-      listingSkuId: it.listingSkuId
-    }));
-    void persistSetItems(kind, updatedList, "已手动升级该条目的固定素材版本");
+    const version = assetSets?.sets[kind].items.find((item) => item.id === itemId)?.latestVersionId;
+    if (!version) return;
+    void editSetItem(kind, itemId, (items, index) => items.map((item, i) => ({
+      ...setItemInput(item), assetVersionId: i === index ? version : item.assetVersionId
+    })), "已升级该条目的固定素材版本");
   };
 
-  const loadPickerAssets = useCallback(
-    async (source: "product" | "all", query: string, kind: AssetSetKind) => {
-      if (!listing) return;
-      setPickerLoading(true);
-      try {
-        const res = await api.listAssets({
-          productId: source === "product" ? listing.productId : undefined,
-          q: query.trim() || undefined,
-          type: kind === "video" ? "video" : "image",
-          page: 1,
-          pageSize: 60
-        });
-        setPickerAssets(res.items);
-      } catch {
-        setPickerAssets([]);
-      } finally {
-        setPickerLoading(false);
-      }
-    },
-    [listing]
+  const imageUploadKind = activeSetKind === "carousel" || activeSetKind === "detail" ? activeSetKind : null;
+  const uploadDisabled = savingSet || savingSkus || !!upload;
+  const beginUpload = (initialFiles?: File[]) => {
+    if (!imageUploadKind || writeLock.current || uploadDisabled) return;
+    setError(null);
+    setUpload({ kind: imageUploadKind, initialFiles, batchVersions: new Set() });
+  };
+  const { draggingOver: draggingOverUpload, dropProps: uploadDropProps } = useFileDrop(
+    beginUpload,
+    uploadDisabled || !imageUploadKind
   );
 
-  const openPicker = (kind: AssetSetKind, skuTargetId: string | null = null) => {
+  const bindUpload = async (versions: string[], mainVersion?: string) => {
+    if (!upload) return;
+    let addedVersions: string[] = [];
+    await writeSet(upload.kind, (items) => {
+      const existing = new Set(items.map((item) => item.assetVersionId));
+      const next = mergeUploadBatch(items, versions, upload.batchVersions, mainVersion);
+      addedVersions = next.map((item) => item.assetVersionId).filter((version) => !existing.has(version));
+      return next;
+    }, "已将上传的图片加入图组");
+    setUpload({ ...upload, batchVersions: new Set([...upload.batchVersions, ...addedVersions]) });
+  };
+
+  const openPicker = (kind: AssetSetKind, skuTargets: string[] = [], replaceItem: AssetSetItemRecord | null = null, source: "product" | "sibling" = "product") => {
+    if (writeLock.current) return;
     setPickerKind(kind);
-    setPickerSkuTarget(skuTargetId);
-    setPickerSourceTab("product");
+    setPickerSkuTargets(skuTargets);
+    setPickerReplaceItem(replaceItem);
+    setPickerSourceTab(source);
     setPickerQuery("");
+    setPickerPage(1);
+    setPickerSelected([]);
+    setPickerError(null);
+    setPickerLoading(true);
+    setPickerSiblingId(siblings.find((sibling) => sibling.id === pickerSiblingId && sibling.id !== id)?.id
+      ?? siblings.find((sibling) => sibling.id !== id)?.id ?? "");
     setPickerOpen(true);
-    void loadPickerAssets("product", "", kind);
-    const otherSiblings = siblings.filter((s) => s.id !== id);
-    const firstOtherSibling = otherSiblings[0];
-    if (firstOtherSibling && !pickerSiblingId) {
-      setPickerSiblingId(firstOtherSibling.id);
-    }
   };
 
+  const pickerProductId = listing?.productId;
   useEffect(() => {
-    if (!pickerOpen) return;
-    if (pickerSourceTab === "product" || pickerSourceTab === "all") {
-      void loadPickerAssets(pickerSourceTab, pickerQuery, pickerKind);
-    } else if (pickerSourceTab === "sibling" && pickerSiblingId) {
-      setPickerLoading(true);
-      api
-        .getListingAssetSets(pickerSiblingId)
-        .then((res) => setPickerSiblingSets(res))
-        .catch(() => setPickerSiblingSets(null))
-        .finally(() => setPickerLoading(false));
-    }
-  }, [pickerOpen, pickerSourceTab, pickerQuery, pickerKind, pickerSiblingId, loadPickerAssets]);
+    if (!pickerOpen || !pickerProductId) return;
+    let cancelled = false;
+    setPickerLoading(true);
+    setPickerError(null);
+    setPickerSiblingSets(null);
+    setPickerSibling(null);
+    const load = async () => {
+      try {
+        if (pickerSourceTab === "sibling") {
+          if (!pickerSiblingId) return;
+          const [sets, sibling] = await Promise.all([
+            api.getListingAssetSets(pickerSiblingId),
+            api.getListing(pickerSiblingId)
+          ]);
+          if (!cancelled) {
+            setPickerSiblingSets(sets);
+            setPickerSibling(sibling);
+          }
+        } else {
+          const result = await api.listAssets({
+            productId: pickerSourceTab === "product" ? pickerProductId : undefined,
+            q: pickerQuery.trim() || undefined,
+            type: pickerKind === "video" ? "video" : "image",
+            page: pickerPage,
+            pageSize: PICKER_PAGE_SIZE
+          });
+          if (!cancelled) {
+            setPickerAssets(result.items);
+            setPickerTotal(result.total);
+            if (pickerPage > 1 && (pickerPage - 1) * PICKER_PAGE_SIZE >= result.total) {
+              setPickerPage(Math.max(1, Math.ceil(result.total / PICKER_PAGE_SIZE)));
+            }
+          }
+        }
+      } catch (error) {
+        if (!cancelled) setPickerError(error instanceof Error ? error.message : "加载素材失败");
+      } finally {
+        if (!cancelled) setPickerLoading(false);
+      }
+    };
+    void load();
+    return () => { cancelled = true; };
+  }, [pickerOpen, pickerProductId, pickerSourceTab, pickerQuery, pickerKind, pickerSiblingId, pickerPage]);
 
-  const handlePickVersion = (assetVersionId: string) => {
-    if (!assetSets) return;
-    if (pickerKind === "sku" && pickerSkuTarget) {
-      const existing = assetSets.sets.sku.items.filter(
-        (it) => it.listingSkuId !== pickerSkuTarget
-      );
-      const next = [
-        ...existing.map((it) => ({
-          assetVersionId: it.assetVersionId,
-          listingSkuId: it.listingSkuId
-        })),
-        { assetVersionId, listingSkuId: pickerSkuTarget }
-      ];
-      setPickerOpen(false);
-      void persistSetItems("sku", next, "已更新该 SKU 专属图片（其他 SKU 绑定不受影响）");
-      return;
-    }
-
-    const existing = assetSets.sets[pickerKind].items;
-    const next = [
-      ...existing.map((it) => ({
-        assetVersionId: it.assetVersionId,
-        listingSkuId: it.listingSkuId
-      })),
-      { assetVersionId, listingSkuId: null }
-    ];
-    void persistSetItems(pickerKind, next, "已添加固定版本到当前素材组");
+  const togglePickerVersion = (id: string, name: string) => {
+    setPickerSelected((current) => current.some((item) => item.id === id) ? current.filter((item) => item.id !== id)
+      : pickerKind === "sku" || pickerReplaceItem ? [{ id, name }] : [...current, { id, name }]);
   };
 
-  const handleSaveSkuBindings = async () => {
-    if (!id || !product) return;
-    setSavingSkus(true);
-    setError(null);
+  const finishPickerWrite = async (...args: Parameters<typeof writeSet>) => {
+    if (writeLock.current) return;
+    setPickerError(null);
     try {
-      const items = product.skus
-        .filter((sku) => skuDraft[sku.id]?.selected)
-        .map((sku) => ({
-          skuId: sku.id,
-          channelCode: skuDraft[sku.id]?.channelCode.trim() ?? "",
-          displayName: skuDraft[sku.id]?.displayName.trim() ?? ""
-        }));
-      const updated = await api.syncListingSkus(id, items);
-      setListing(updated);
-      const refreshedSets = await api.getListingAssetSets(id);
-      setAssetSets(refreshedSets);
-      flashNotice(`已更新当前上架链接的 ${items.length} 个 SKU 映射`);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "保存 SKU 映射失败");
-    } finally {
-      setSavingSkus(false);
+      await writeSet(...args);
+      setPickerOpen(false);
+    } catch (error) {
+      setPickerError(error instanceof Error ? error.message : "保存素材组失败");
     }
+  };
+
+  const applyPickerSelection = () => {
+    const [first] = pickerSelected;
+    if (!first) return;
+    void finishPickerWrite(pickerKind, (current) => {
+      if (pickerKind === "sku") {
+        const targets = new Set(pickerSkuTargets);
+        return [
+          ...current.filter((item) => !item.listingSkuId || !targets.has(item.listingSkuId)).map(setItemInput),
+          ...pickerSkuTargets.map((listingSkuId) => ({ assetVersionId: first.id, listingSkuId }))
+        ];
+      }
+      if (pickerReplaceItem) {
+        const target = findReplacementTarget(current, pickerReplaceItem);
+        if (!target) throw new Error("无法在最新图组确认原条目，请重新选择替换位置");
+        return current.map((item) => ({ ...setItemInput(item), assetVersionId: item.id === target.id ? first.id : item.assetVersionId }));
+      }
+      const existing = new Set(current.map((item) => item.assetVersionId));
+      return [...current.map(setItemInput), ...pickerSelected.filter((item) => !existing.has(item.id))
+        .map((item) => ({ assetVersionId: item.id, listingSkuId: null }))];
+    }, pickerKind === "sku" ? `已为 ${pickerSkuTargets.length} 个 SKU 应用同一图片版本` : pickerReplaceItem ? "已在原位置替换素材" : "已加入已选素材版本");
+  };
+
+  const handleReuseGroup = (overwrite = false) => {
+    if (!pickerSiblingSets || !pickerSibling || !listing || !assetSets || pickerSibling.productId !== listing.productId) return;
+    const source = pickerSiblingSets.sets[pickerKind].items;
+    const current = assetSets.sets[pickerKind].items;
+    if (!source.length || pickerReplaceItem || (pickerKind === "sku" && pickerSkuTargets.length > 0)) return;
+    const apply = (requireUnchanged: boolean) => finishPickerWrite(pickerKind, (latest) => {
+      if (requireUnchanged && (latest.length !== current.length || latest.some((item, index) => item.id !== current[index]?.id))) {
+        throw new Error("目标素材组在确认前已更新，请检查后重新确认");
+      }
+      if (pickerKind === "sku") {
+        const reused = reuseSkuImages(pickerSibling.skus, source, listing.skus, latest, overwrite);
+        if (reused.length === latest.length && reused.every((item, index) =>
+          item.assetVersionId === latest[index]?.assetVersionId && item.listingSkuId === latest[index]?.listingSkuId
+        )) {
+          throw new Error(overwrite ? "没有需要更新图片的匹配 SKU" : "没有可补图的匹配 SKU");
+        }
+        return reused;
+      }
+      return source.map(setItemInput);
+    }, pickerKind === "sku" ? "已按商品 SKU 匹配复用图片" : "已按原顺序复用整组固定版本");
+    if (pickerKind === "sku" ? overwrite : current.length > 0) {
+      setConfirmDialog({
+        title: pickerKind === "sku" ? "覆盖匹配 SKU 的图片" : `替换当前${ASSET_GROUP_LABELS[pickerKind]}`,
+        description: pickerKind === "sku" ? "按商品 SKU 匹配。已有图片的匹配项将换为来源链接的固定版本，未匹配项保留。"
+          : `当前组的 ${current.length} 项引用将替换为来源链接的 ${source.length} 项，沿用来源顺序。`,
+        confirmLabel: "确认覆盖",
+        tone: "warning",
+        onConfirm: async () => {
+          setConfirmBusy(true);
+          await apply(true);
+          setConfirmBusy(false);
+          setConfirmDialog(null);
+        }
+      });
+    } else if (pickerKind === "sku") {
+      void apply(false);
+    } else {
+      void apply(true);
+    }
+  };
+
+  const handleSaveSkuBindings = () => {
+    if (!id || !product || writeLock.current) return;
+    const items = product.skus.flatMap((sku) => {
+      const draft = skuDraft[sku.id];
+      return draft?.selected ? [{
+        skuId: sku.id,
+        channelCode: draft.channelCode.trim(),
+        displayName: draft.displayName.trim()
+      }] : [];
+    });
+    const selected = new Set(items.map((item) => item.skuId));
+    const unbinding = (currentListing: ListingDetail, sets: ListingAssetSetsResponse) => {
+      const pictured = new Set(sets.sets.sku.items.map((item) => item.listingSkuId));
+      return currentListing.skus.filter((sku) => !selected.has(sku.skuId) && pictured.has(sku.id));
+    };
+    const save = async (confirmed: string[] = []) => {
+      if (writeLock.current) return;
+      writeLock.current = true;
+      setSavingSkus(true);
+      setError(null);
+      try {
+        const [latestListing, latestSets] = await Promise.all([api.getListing(id), api.getListingAssetSets(id)]);
+        const impacted = unbinding(latestListing, latestSets);
+        if (impacted.some((sku) => !confirmed.includes(sku.id))) {
+          setListing(latestListing);
+          setAssetSets(latestSets);
+          showConfirmation(impacted);
+          return;
+        }
+        const updated = await api.syncListingSkus(id, items);
+        setListing(updated);
+        setAssetSets(await api.getListingAssetSets(id));
+        setSelectedSkuIds((current) => current.filter((skuId) => updated.skus.some((sku) => sku.id === skuId)));
+        setConfirmDialog(null);
+        flashNotice(`已更新当前上架链接的 ${items.length} 个 SKU 映射`);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : "保存 SKU 映射失败");
+      } finally {
+        writeLock.current = false;
+        setSavingSkus(false);
+      }
+    };
+    const showConfirmation = (impacted: ListingDetail["skus"]) => setConfirmDialog({
+      title: "确认移除有图的上架 SKU",
+      description: `以下 ${impacted.length} 个 SKU 将从本链接移除，同时解除 SKU 图引用：${impacted.map((sku) => sku.skuCode).join("、")}。`,
+      confirmLabel: "移除 SKU 并解除图片引用",
+      tone: "warning",
+      onConfirm: async () => {
+        setConfirmBusy(true);
+        await save(impacted.map((sku) => sku.id));
+        setConfirmBusy(false);
+      }
+    });
+    const impacted = listing && assetSets ? unbinding(listing, assetSets) : [];
+    if (impacted.length) showConfirmation(impacted);
+    else void save();
   };
 
   const handleSavePdpDraft = async () => {
@@ -851,6 +1075,26 @@ export function ListingWorkbenchPage() {
   const titleCodePoints = countCodePoints(pdpContent.title);
   const titleUtf8Bytes = new TextEncoder().encode(pdpContent.title).length;
   const otherSiblings = siblings.filter((s) => s.id !== listing.id);
+  const isFixItem = (item: AssetSetItemRecord) => fixTarget?.kind === item.kind
+    && !!fixTarget.assetVersionId && fixTarget.assetVersionId === item.assetVersionId;
+  const skuItems = assetSets?.sets.sku.items ?? [];
+  const picturedSkuIds = new Set(skuItems.filter(isUsableSkuImage).map((item) => item.listingSkuId));
+  const coveredSkuCount = listing.skus.filter((sku) => picturedSkuIds.has(sku.id)).length;
+  const visibleSkus = listing.skus.filter((sku) => !missingSkuOnly || !picturedSkuIds.has(sku.id));
+  const visibleSkuIds = new Set(visibleSkus.map((sku) => sku.id));
+  const allVisibleSkusSelected = visibleSkus.length > 0 && visibleSkus.every((sku) => selectedSkuIds.includes(sku.id));
+  const isFixSku = (skuId: string) => fixTarget?.kind === "sku" && (fixTarget.listingSkuId
+    ? skuId === fixTarget.listingSkuId
+    : skuItems.some((item) => item.listingSkuId === skuId && isFixItem(item)));
+  const hasFixItem = activeSetKind === "sku" ? visibleSkus.some((sku) => isFixSku(sku.id)) : currentSetItems.some(isFixItem);
+  const highlightGroup = fixTarget?.kind === activeSetKind && !hasFixItem;
+  const skuReuseOnly = pickerKind === "sku" && pickerSkuTargets.length === 0;
+  const pickerPages = Math.max(1, Math.ceil(pickerTotal / PICKER_PAGE_SIZE));
+  const siblingItems = pickerSiblingSets?.sets[pickerKind].items ?? [];
+  const selectedVersions = new Set(pickerSelected.map((item) => item.id));
+  const replacementItems = assetSets?.sets[pickerKind].items ?? [];
+  const replacementTarget = pickerReplaceItem && findReplacementTarget(replacementItems, pickerReplaceItem);
+  const needsReplacementTarget = !!pickerReplaceItem && !replacementTarget;
 
   return (
     <div className="space-y-5">
@@ -1097,7 +1341,11 @@ export function ListingWorkbenchPage() {
       </div>
 
       {activeTab === "assets" && assetSets && (
-        <div className="space-y-4">
+        <div
+          id={`workbench-group-${activeSetKind}`}
+          tabIndex={-1}
+          className={`space-y-4 scroll-mt-20 ${highlightGroup ? "rounded-xl ring-2 ring-amber-400 ring-offset-4" : ""}`}
+        >
           <div className="flex flex-wrap items-center justify-between gap-3">
             <div className="flex flex-wrap items-center gap-1.5">
               {(
@@ -1111,7 +1359,10 @@ export function ListingWorkbenchPage() {
                 <button
                   key={tabItem.kind}
                   type="button"
-                  onClick={() => setActiveSetKind(tabItem.kind)}
+                  onClick={() => {
+                    setActiveSetKind(tabItem.kind);
+                    setFixTarget(null);
+                  }}
                   className={`rounded-lg border px-3 py-1.5 text-xs font-medium transition-colors ${
                     activeSetKind === tabItem.kind
                       ? "border-blue-600 bg-blue-600 text-white"
@@ -1126,11 +1377,26 @@ export function ListingWorkbenchPage() {
             {activeSetKind !== "sku" && (
               <div className="flex items-center gap-2">
                 {savingSet && (
-                  <span className="text-xs text-blue-600">正在同步素材组排序...</span>
+                  <span className="text-xs text-blue-600">正在保存素材组...</span>
+                )}
+                {imageUploadKind && (
+                  <button
+                    {...uploadDropProps}
+                    type="button"
+                    aria-haspopup="dialog"
+                    disabled={uploadDisabled}
+                    onClick={() => beginUpload()}
+                    className={`rounded-lg border border-dashed px-3 py-1.5 text-xs font-medium text-gray-700 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-blue-600 disabled:opacity-50 ${
+                      draggingOverUpload ? "border-blue-500 bg-blue-50" : "border-gray-300 bg-gray-50 hover:border-blue-400 hover:bg-blue-50/40"
+                    }`}
+                  >
+                    上传到{ASSET_GROUP_LABELS[imageUploadKind]}
+                  </button>
                 )}
                 <button
                   type="button"
-                  onClick={() => openPicker(activeSetKind, null)}
+                  disabled={savingSet || savingSkus}
+                  onClick={() => openPicker(activeSetKind)}
                   className="inline-flex items-center gap-1.5 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-medium text-white hover:bg-blue-700"
                 >
                   <Plus className="h-3.5 w-3.5" />
@@ -1167,6 +1433,9 @@ export function ListingWorkbenchPage() {
                           item={item}
                           index={idx}
                           isMainSlot={idx === 0}
+                          highlighted={isFixItem(item)}
+                          onSetMain={() => void editSetItem("carousel", item.id, (items, index) => arrayMove(items, index, 0).map(setItemInput), "已设为主图")}
+                          onReplace={() => openPicker("carousel", [], item)}
                           onRemove={(itemId) => handleRemoveSetItem("carousel", itemId)}
                           onUpgrade={(itemId) => handleUpgradeSetItem("carousel", itemId)}
                         />
@@ -1201,6 +1470,10 @@ export function ListingWorkbenchPage() {
                             key={item.id}
                             item={item}
                             index={idx}
+                            highlighted={isFixItem(item)}
+                            previewSelected={detailPreviewId === item.id}
+                            onPreview={() => jumpToDetailPreview(item.id)}
+                            onReplace={() => openPicker("detail", [], item)}
                             onRemove={(itemId) => handleRemoveSetItem("detail", itemId)}
                             onUpgrade={(itemId) => handleUpgradeSetItem("detail", itemId)}
                           />
@@ -1226,7 +1499,7 @@ export function ListingWorkbenchPage() {
                       {mobilePreviewWidth ? "手机窄屏 (375px)" : "自适应宽度"}
                     </button>
                   </div>
-                  <div className="max-h-[680px] overflow-y-auto rounded-xl border border-gray-200 bg-gray-100 p-3">
+                  <div ref={detailPreviewRef} tabIndex={-1} aria-label="详情图预览" className="max-h-[680px] overflow-y-auto rounded-xl border border-gray-200 bg-gray-100 p-3">
                     {currentSetItems.length === 0 ? (
                       <div className="py-16 text-center text-xs text-gray-400">
                         添加详情图后在此无缝拼接预览
@@ -1238,13 +1511,16 @@ export function ListingWorkbenchPage() {
                         }`}
                       >
                         {currentSetItems.map((item, idx) => (
-                          <div key={item.id} className="relative">
+                          <div key={item.id} id={`workbench-preview-${item.id}`} className="relative">
                             <img
                               src={api.contentUrl(item.assetId, item.assetVersionId, true)}
                               alt={`详情图 #${idx + 1} ${item.assetName}`}
-                              className="block w-full"
+                              className="block h-auto w-full"
+                              width={item.width ?? undefined}
+                              height={item.height ?? undefined}
                               loading="lazy"
                             />
+                            {detailPreviewId === item.id && <span aria-hidden="true" className="pointer-events-none absolute inset-0 ring-4 ring-inset ring-blue-500" />}
                             <span className="absolute top-1.5 left-1.5 rounded bg-gray-900/65 px-1.5 py-0.5 font-mono-tabular text-[10px] text-white">
                               #{idx + 1} · V{item.versionNo}
                             </span>
@@ -1259,15 +1535,60 @@ export function ListingWorkbenchPage() {
           )}
 
           {activeSetKind === "sku" && (
-            <div className="overflow-hidden rounded-xl border border-gray-200 bg-white">
+            <div className="overflow-x-auto rounded-xl border border-gray-200 bg-white">
+              <div className="flex flex-wrap items-center gap-3 border-b border-gray-200 p-3 text-xs">
+                <span className="font-medium">SKU 图覆盖率 {coveredSkuCount}/{listing.skus.length}（{listing.skus.length ? Math.round(100 * coveredSkuCount / listing.skus.length) : 0}%）</span>
+                <label className="inline-flex items-center gap-1.5">
+                  <input type="checkbox" checked={missingSkuOnly} onChange={(event) => setMissingSkuOnly(event.target.checked)} />
+                  只看缺图
+                </label>
+                <button
+                  type="button"
+                  disabled={!selectedSkuIds.length || savingSet || savingSkus}
+                  onClick={() => openPicker("sku", selectedSkuIds)}
+                  className="rounded-md border border-blue-200 px-2.5 py-1 text-blue-700 hover:bg-blue-50 disabled:opacity-50"
+                >
+                  批量选图（已选 {selectedSkuIds.length}）
+                </button>
+                {selectedSkuIds.length > 0 && <button type="button" onClick={() => setSelectedSkuIds([])} className="text-gray-600 hover:underline">清空已选 SKU</button>}
+                <button
+                  type="button"
+                  disabled={!otherSiblings.length || !listing.skus.length || savingSet || savingSkus}
+                  onClick={() => openPicker("sku", [], null, "sibling")}
+                  className="rounded-md border border-blue-200 px-2.5 py-1 text-blue-700 hover:bg-blue-50 disabled:opacity-50"
+                >
+                  按商品 SKU 复用图片
+                </button>
+                <button
+                  type="button"
+                  disabled={savingSet || savingSkus}
+                  onClick={() => setActiveTab("skus")}
+                  className="ml-auto rounded-md px-2.5 py-1 text-gray-700 hover:bg-gray-100 disabled:opacity-50"
+                >
+                  管理上架 SKU
+                </button>
+              </div>
               {listing.skus.length === 0 ? (
                 <div className="p-10 text-center text-xs text-gray-500">
                   当前上架链接尚未绑定任何 SKU。请先切换到「SKU 绑定与渠道映射」勾选要上架的 SKU。
                 </div>
+              ) : visibleSkus.length === 0 ? (
+                <div className="p-10 text-center text-xs text-gray-500">当前上架链接的 SKU 均已配图。</div>
               ) : (
                 <table className="w-full border-collapse text-left text-xs">
                   <thead className="border-b border-gray-200 bg-gray-50 text-gray-600">
                     <tr>
+                      <th className="py-3 pl-4">
+                        <input
+                          type="checkbox"
+                          aria-label="全选当前可见 SKU"
+                          checked={allVisibleSkusSelected}
+                          onChange={(event) => {
+                            const checked = event.target.checked;
+                            setSelectedSkuIds((current) => checked ? [...new Set([...current, ...visibleSkuIds])] : current.filter((skuId) => !visibleSkuIds.has(skuId)));
+                          }}
+                        />
+                      </th>
                       <th className="px-4 py-3 font-medium">商品 SKU</th>
                       <th className="px-4 py-3 font-medium">渠道 SKU 编码 / 展示名</th>
                       <th className="px-4 py-3 font-medium">已绑定图片版本</th>
@@ -1275,17 +1596,38 @@ export function ListingWorkbenchPage() {
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-gray-100">
-                    {listing.skus.map((lsku) => {
-                      const boundItem = assetSets.sets.sku.items.find(
-                        (it) => it.listingSkuId === lsku.id
-                      );
+                    {visibleSkus.map((lsku) => {
+                      const matches = skuItems.filter((item) => item.listingSkuId === lsku.id);
+                      const boundItem = matches.find(isFixItem) ?? matches.find(isUsableSkuImage) ?? matches[0];
+                      const highlighted = isFixSku(lsku.id);
                       return (
-                        <tr key={lsku.id} className="hover:bg-gray-50/60">
+                        <tr
+                          key={lsku.id}
+                          tabIndex={highlighted ? -1 : undefined}
+                          data-workbench-target={highlighted || undefined}
+                          className={highlighted ? "bg-amber-50 outline-2 -outline-offset-2 outline-amber-400" : "hover:bg-gray-50/60"}
+                        >
+                          <td className="pl-4">
+                            <input
+                              type="checkbox"
+                              aria-label={`选择 SKU ${lsku.skuCode}`}
+                              checked={selectedSkuIds.includes(lsku.id)}
+                              onChange={(event) => {
+                                const checked = event.target.checked;
+                                setSelectedSkuIds((current) => checked ? [...current, lsku.id] : current.filter((skuId) => skuId !== lsku.id));
+                              }}
+                            />
+                          </td>
                           <td className="px-4 py-3">
                             <div className="font-mono-tabular font-medium text-gray-900">
                               {lsku.skuCode}
                             </div>
                             <div className="text-[11px] text-gray-500">{lsku.skuName}</div>
+                            <div className="flex flex-wrap gap-x-2 text-[11px] text-gray-600">
+                              {Object.entries(lsku.skuAttributes).map(([label, value]) => (
+                                <span key={label}>{label} · {value}</span>
+                              ))}
+                            </div>
                           </td>
                           <td className="px-4 py-3">
                             <div className="font-mono-tabular text-gray-800">
@@ -1309,6 +1651,8 @@ export function ListingWorkbenchPage() {
                                 <div>
                                   <div className="flex items-center gap-1.5 font-medium text-gray-900">
                                     <span>{boundItem.assetName}</span>
+                                    {boundItem.assetDeleted && <span className="text-rose-700">素材已删除</span>}
+                                    {boundItem.assetType !== "image" && <span className="text-rose-700">非图片素材</span>}
                                     <span className="rounded bg-gray-100 px-1.5 py-0.5 font-mono-tabular text-[10px]">
                                       V{boundItem.versionNo}
                                     </span>
@@ -1339,7 +1683,7 @@ export function ListingWorkbenchPage() {
                             <div className="inline-flex items-center gap-1.5">
                               <button
                                 type="button"
-                                onClick={() => openPicker("sku", lsku.id)}
+                                onClick={() => openPicker("sku", [lsku.id])}
                                 className="rounded-md border border-blue-200 bg-blue-50 px-2.5 py-1 text-[11px] font-medium text-blue-700 hover:bg-blue-100"
                               >
                                 {boundItem ? "替换该 SKU 图" : "选择 SKU 图"}
@@ -1386,6 +1730,8 @@ export function ListingWorkbenchPage() {
                           key={item.id}
                           item={item}
                           index={idx}
+                          highlighted={isFixItem(item)}
+                          onReplace={() => openPicker("video", [], item)}
                           onRemove={(itemId) => handleRemoveSetItem("video", itemId)}
                           onUpgrade={(itemId) => handleUpgradeSetItem("video", itemId)}
                         />
@@ -1993,24 +2339,34 @@ export function ListingWorkbenchPage() {
         </div>
       )}
 
-      {activeTab === "release" && <ListingReleasePanel listing={listing} />}
+      {activeTab === "release" && <ListingReleasePanel listing={listing} onFixAsset={handleFixAsset} />}
+
+      {upload && (
+        <BatchAssetUpload
+          dialogTitle={`上传到${ASSET_GROUP_LABELS[upload.kind]}`}
+          initialFiles={upload.initialFiles}
+          group={{ kind: upload.kind, productId: listing.productId, onBind: bindUpload }}
+          onClose={() => setUpload(null)}
+        />
+      )}
 
       {pickerOpen && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-gray-900/40 p-4">
-          <div className="flex max-h-[85vh] w-full max-w-4xl flex-col rounded-xl border border-gray-200 bg-white shadow-xl">
+          <div role="dialog" aria-modal="true" aria-labelledby="workbench-picker-title" className="flex max-h-[85vh] w-full max-w-4xl flex-col rounded-xl border border-gray-200 bg-white shadow-xl">
             <div className="flex items-center justify-between border-b border-gray-200 px-5 py-3.5">
               <div>
-                <h2 className="text-sm font-semibold text-gray-900">
-                  {pickerSkuTarget
-                    ? "选择该 SKU 的专属图片版本"
-                    : `添加素材版本到「${pickerKind}」素材组`}
+                <h2 id="workbench-picker-title" className="text-sm font-semibold text-gray-900">
+                  {skuReuseOnly ? "按商品 SKU 复用图片"
+                    : pickerSkuTargets.length > 1 ? `为 ${pickerSkuTargets.length} 个 SKU 选择同一图片版本`
+                    : pickerSkuTargets.length ? "选择该 SKU 的专属图片版本"
+                    : pickerReplaceItem ? `原位替换 ${pickerReplaceItem.assetName}`
+                    : `添加 / 复用${ASSET_GROUP_LABELS[pickerKind]}素材版本`}
                 </h2>
-                <p className="text-[11px] text-gray-500">
-                  直接引用已有素材的当前版本，无需重复上传原文件
-                </p>
               </div>
               <button
                 type="button"
+                aria-label="关闭选图"
+                disabled={savingSet}
                 onClick={() => setPickerOpen(false)}
                 className="rounded-md p-1 text-gray-400 hover:bg-gray-100"
               >
@@ -2019,10 +2375,12 @@ export function ListingWorkbenchPage() {
             </div>
 
             <div className="flex flex-wrap items-center justify-between gap-2 border-b border-gray-100 px-5 py-2.5 text-xs">
-              <div className="flex items-center gap-1.5">
+              <div className="flex flex-wrap items-center gap-1.5">
+                {!skuReuseOnly && <>
                 <button
                   type="button"
-                  onClick={() => setPickerSourceTab("product")}
+                  disabled={savingSet}
+                  onClick={() => { setPickerPage(1); setPickerSourceTab("product"); }}
                   className={`rounded-md px-2.5 py-1 font-medium ${
                     pickerSourceTab === "product"
                       ? "bg-blue-50 text-blue-700"
@@ -2033,7 +2391,8 @@ export function ListingWorkbenchPage() {
                 </button>
                 <button
                   type="button"
-                  onClick={() => setPickerSourceTab("all")}
+                  disabled={savingSet}
+                  onClick={() => { setPickerPage(1); setPickerSourceTab("all"); }}
                   className={`rounded-md px-2.5 py-1 font-medium ${
                     pickerSourceTab === "all"
                       ? "bg-blue-50 text-blue-700"
@@ -2042,9 +2401,11 @@ export function ListingWorkbenchPage() {
                 >
                   全部素材库
                 </button>
+                </>}
                 {otherSiblings.length > 0 && (
                   <button
                     type="button"
+                    disabled={savingSet}
                     onClick={() => setPickerSourceTab("sibling")}
                     className={`rounded-md px-2.5 py-1 font-medium ${
                       pickerSourceTab === "sibling"
@@ -2063,7 +2424,9 @@ export function ListingWorkbenchPage() {
                   <input
                     type="text"
                     value={pickerQuery}
-                    onChange={(e) => setPickerQuery(e.target.value)}
+                    disabled={savingSet}
+                    aria-label="搜索素材名"
+                    onChange={(e) => { setPickerPage(1); setPickerQuery(e.target.value); }}
                     placeholder="搜索素材名..."
                     className="w-full rounded-lg border border-gray-200 py-1 pr-2.5 pl-8 text-xs"
                   />
@@ -2071,6 +2434,8 @@ export function ListingWorkbenchPage() {
               ) : (
                 <select
                   value={pickerSiblingId}
+                  aria-label="来源上架链接"
+                  disabled={savingSet}
                   onChange={(e) => setPickerSiblingId(e.target.value)}
                   className="rounded-lg border border-gray-200 bg-white px-2.5 py-1 text-xs"
                 >
@@ -2088,17 +2453,19 @@ export function ListingWorkbenchPage() {
                 <div className="py-10 text-center text-xs text-gray-500">正在加载候选素材...</div>
               ) : pickerSourceTab === "sibling" ? (
                 <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
-                  {(pickerSiblingSets?.sets[pickerKind].items ?? []).length === 0 ? (
+                  {siblingItems.length === 0 ? (
                     <div className="col-span-full py-10 text-center text-xs text-gray-400">
-                      该链接的「{pickerKind}」素材组为空
+                      该链接的{ASSET_GROUP_LABELS[pickerKind]}为空
                     </div>
                   ) : (
-                    (pickerSiblingSets?.sets[pickerKind].items ?? []).map((item) => (
+                    siblingItems.map((item) => (
                       <button
                         key={item.id}
                         type="button"
-                        onClick={() => handlePickVersion(item.assetVersionId)}
-                        className="flex flex-col overflow-hidden rounded-xl border border-gray-200 bg-white text-left hover:border-blue-500"
+                        disabled={savingSet || skuReuseOnly || item.assetDeleted || (pickerKind === "sku" && !isUsableSkuImage(item))}
+                        aria-pressed={skuReuseOnly ? undefined : selectedVersions.has(item.assetVersionId)}
+                        onClick={() => togglePickerVersion(item.assetVersionId, item.assetName)}
+                        className={`flex flex-col overflow-hidden rounded-xl border bg-white text-left enabled:hover:border-blue-500 ${selectedVersions.has(item.assetVersionId) ? "border-blue-600 ring-2 ring-blue-400" : "border-gray-200"}`}
                       >
                         <div className="aspect-square bg-gray-100">
                           <img
@@ -2110,7 +2477,7 @@ export function ListingWorkbenchPage() {
                         <div className="p-2 text-[11px]">
                           <div className="truncate font-medium text-gray-900">{item.assetName}</div>
                           <div className="font-mono-tabular text-[10px] text-gray-500">
-                            固定版本 V{item.versionNo}
+                            固定版本 V{item.versionNo}{item.skuCode ? ` · ${item.skuCode}` : ""}{item.assetDeleted ? " · 已删除" : ""}
                           </div>
                         </div>
                       </button>
@@ -2124,13 +2491,14 @@ export function ListingWorkbenchPage() {
               ) : (
                 <div className="grid grid-cols-2 gap-3 sm:grid-cols-3 md:grid-cols-4">
                   {pickerAssets.map((asset) => {
-                    const reviewMeta = REVIEW_STATUS_META[asset.reviewStatus];
                     return (
                       <button
                         key={asset.id}
                         type="button"
-                        onClick={() => handlePickVersion(asset.currentVersionId)}
-                        className="flex flex-col overflow-hidden rounded-xl border border-gray-200 bg-white text-left transition-colors hover:border-blue-500"
+                        disabled={savingSet}
+                        aria-pressed={selectedVersions.has(asset.currentVersionId)}
+                        onClick={() => togglePickerVersion(asset.currentVersionId, asset.name)}
+                        className={`flex flex-col overflow-hidden rounded-xl border bg-white text-left enabled:hover:border-blue-500 ${selectedVersions.has(asset.currentVersionId) ? "border-blue-600 ring-2 ring-blue-400" : "border-gray-200"}`}
                       >
                         <div className="relative aspect-square bg-gray-100">
                           <img
@@ -2138,11 +2506,6 @@ export function ListingWorkbenchPage() {
                             alt={asset.name}
                             className="h-full w-full object-contain"
                           />
-                          <span
-                            className={`absolute right-1.5 bottom-1.5 rounded border px-1.5 py-0.5 text-[10px] font-medium ${reviewMeta.className}`}
-                          >
-                            {reviewMeta.label}
-                          </span>
                         </div>
                         <div className="p-2 text-[11px]">
                           <div className="truncate font-medium text-gray-900">{asset.name}</div>
@@ -2158,6 +2521,61 @@ export function ListingWorkbenchPage() {
                   })}
                 </div>
               )}
+            </div>
+            {pickerSourceTab !== "sibling" && (
+              <nav aria-label="选图分页" className="flex items-center justify-center gap-4 border-t border-gray-100 px-5 py-2 text-xs">
+                <button type="button" disabled={pickerPage <= 1 || pickerLoading || savingSet} onClick={() => setPickerPage((page) => page - 1)} className="text-blue-700 disabled:opacity-40">上一页</button>
+                <span>第 {pickerPage} / {pickerPages} 页 · 共 {pickerTotal} 项</span>
+                <button type="button" disabled={pickerPage >= pickerPages || pickerLoading || savingSet} onClick={() => setPickerPage((page) => page + 1)} className="text-blue-700 disabled:opacity-40">下一页</button>
+              </nav>
+            )}
+            <div className="space-y-2 border-t border-gray-100 px-5 py-3 text-xs">
+              {pickerError && <p role="alert" className="text-rose-700">{pickerError}</p>}
+              {needsReplacementTarget && (
+                <label className="flex flex-wrap items-center gap-2">
+                  重新选择替换位置
+                  <select
+                    value=""
+                    disabled={savingSet || !replacementItems.length}
+                    onChange={(event) => {
+                      const target = replacementItems.find((item) => item.id === event.target.value);
+                      if (target) {
+                        setPickerReplaceItem(target);
+                        setPickerError(null);
+                      }
+                    }}
+                    className="rounded-md border border-gray-200 px-2 py-1"
+                  >
+                    <option value="" disabled>{replacementItems.length ? "请选择当前图组条目" : "当前图组已空"}</option>
+                    {replacementItems.map((item, index) => <option key={item.id} value={item.id}>#{index + 1} · {item.assetName} · V{item.versionNo}</option>)}
+                  </select>
+                </label>
+              )}
+              {pickerSelected.length > 0 && (
+                <ul aria-label="已选素材" className="flex max-h-24 flex-wrap gap-1.5 overflow-y-auto">
+                  {pickerSelected.map((item) => (
+                    <li key={item.id}>
+                      <button type="button" disabled={savingSet} onClick={() => togglePickerVersion(item.id, item.name)} aria-label={`取消选择 ${item.name}`} className="rounded bg-blue-50 px-2 py-1 text-blue-700">{item.name} ×</button>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              <div className="flex flex-wrap items-center justify-end gap-2">
+                <button type="button" disabled={savingSet} onClick={() => setPickerOpen(false)} className="rounded-md border border-gray-200 px-3 py-1.5 disabled:opacity-50">取消</button>
+                {!skuReuseOnly && (
+                  <button type="button" disabled={savingSet || !pickerSelected.length || needsReplacementTarget} onClick={applyPickerSelection} className="rounded-md bg-blue-600 px-3 py-1.5 text-white disabled:opacity-50">
+                    {pickerReplaceItem ? "确认替换" : pickerSkuTargets.length ? "确认应用图片" : `确认添加（${pickerSelected.length}）`}
+                  </button>
+                )}
+                {pickerSourceTab === "sibling" && !pickerReplaceItem && !pickerSkuTargets.length && (
+                  <>
+                    <button type="button" disabled={pickerLoading || savingSet || !siblingItems.length} onClick={() => handleReuseGroup()} className="rounded-md border border-blue-200 px-3 py-1.5 text-blue-700 disabled:opacity-50">
+                      {skuReuseOnly ? "仅补齐缺图 SKU" : "复用整组"}
+                    </button>
+                    {skuReuseOnly && <button type="button" disabled={pickerLoading || savingSet || !siblingItems.length} onClick={() => handleReuseGroup(true)} className="rounded-md border border-amber-200 px-3 py-1.5 text-amber-800 disabled:opacity-50">覆盖匹配 SKU 的图片</button>}
+                  </>
+                )}
+              </div>
             </div>
           </div>
         </div>

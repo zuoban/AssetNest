@@ -23,7 +23,6 @@ import {
   ingestStagedFile,
   listAssets,
   resolveAssetVersionFile,
-  reviewAssetVersion,
   switchAssetCurrentVersion,
   updateAsset,
   type StagedUploadFile
@@ -40,8 +39,11 @@ const listAssetsQuerySchema = z.object({
   color: z.string().max(80).optional(),
   tagId: z.string().max(500).optional(),
   type: z.enum(["image", "video", "document", "archive", "other"]).optional(),
-  reviewStatus: z.enum(["pending", "approved", "rejected"]).optional(),
   folderId: z.string().uuid().optional(),
+  includeSubfolders: z
+    .union([z.boolean(), z.enum(["true", "false", "1", "0"])])
+    .optional()
+    .transform((val) => (val === undefined ? true : val === true || val === "true" || val === "1")),
   unfiled: z
     .union([z.boolean(), z.enum(["true", "false", "1", "0"])])
     .optional()
@@ -79,23 +81,15 @@ const batchAssetsSchema = z.object({
     "remove_tags",
     "link_products",
     "unlink_products",
-    "set_review_status",
     "soft_delete"
   ]),
   folderId: z.string().uuid().nullable().optional(),
   tagIds: z.array(z.string().min(1)).max(100).optional(),
-  productIds: z.array(z.string().uuid()).max(100).optional(),
-  reviewStatus: z.enum(["pending", "approved", "rejected"]).optional(),
-  reviewNote: z.string().max(1000).optional()
+  productIds: z.array(z.string().uuid()).max(100).optional()
 });
 
 const switchCurrentVersionSchema = z.object({
   versionId: z.string().uuid()
-});
-
-const reviewVersionSchema = z.object({
-  reviewStatus: z.enum(["pending", "approved", "rejected"]),
-  reviewNote: z.string().max(2000).optional()
 });
 
 function parseCsvOrJsonList(values: string[]): string[] {
@@ -487,16 +481,6 @@ export function registerAssetRoutes(
     const body = switchCurrentVersionSchema.parse(request.body);
     return switchAssetCurrentVersion(db, request.authUser!.id, id, body.versionId);
   });
-
-  app.post(
-    "/api/v1/asset-versions/:versionId/review",
-    { preHandler: requireAuth },
-    async (request) => {
-      const { versionId } = request.params as { versionId: string };
-      const body = reviewVersionSchema.parse(request.body);
-      return reviewAssetVersion(db, request.authUser!.id, versionId, body);
-    }
-  );
 
   app.get(
     "/api/v1/assets/:id/versions/:versionId/content",

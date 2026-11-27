@@ -1,7 +1,6 @@
 import crypto from "node:crypto";
 import type {
   ProductMasterImageRecord,
-  ReviewStatus,
   StorageProviderStatus,
   ThumbStatus
 } from "../../../shared/types.js";
@@ -25,7 +24,6 @@ interface MasterImageRow {
   locked_at: string;
   unlocked_at: string | null;
   unlock_note: string | null;
-  review_status: ReviewStatus;
   thumb_status: ThumbStatus;
   storage_id: string;
   storage_status: StorageProviderStatus;
@@ -54,7 +52,6 @@ function mapMasterRow(row: MasterImageRow): ProductMasterImageRecord {
     lockedAt: row.locked_at,
     unlockedAt: row.unlocked_at,
     unlockNote: row.unlock_note,
-    reviewStatus: row.review_status,
     thumbStatus: row.thumb_status,
     storageId: row.storage_id,
     storageStatus: row.storage_status,
@@ -97,7 +94,7 @@ export function listProductMasterImages(
          (SELECT MAX(av2.version_no) FROM asset_versions av2 WHERE av2.asset_id = av.asset_id) AS latest_version_no,
          av.original_filename, pmi.angle, pmi.is_primary, pmi.lock_note,
          pmi.locked_at, pmi.unlocked_at, pmi.unlock_note,
-         av.review_status, av.thumb_status,
+         av.thumb_status,
          f.storage_id, sp.status AS storage_status, f.sha256, f.size_bytes,
          f.mime_type, f.ext, f.width, f.height
        FROM product_master_images pmi

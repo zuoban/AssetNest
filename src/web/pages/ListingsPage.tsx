@@ -407,6 +407,9 @@ export function ListingsPage() {
           <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
             {listings.map((item) => {
               const statusMeta = LISTING_STATUS_META[item.status];
+              const missingSkuCount = Math.max(0, item.skuCount - item.skuImageCount);
+              const assetGroupLinkClass =
+                "rounded-md px-1 py-0.5 hover:bg-blue-50 hover:text-blue-700 focus-visible:outline-2 focus-visible:outline-blue-500";
               return (
                 <div
                   key={item.id}
@@ -466,20 +469,27 @@ export function ListingsPage() {
 
                   <div className="mt-auto pt-3">
                     <div className="grid grid-cols-4 gap-1.5 rounded-lg border border-gray-100 bg-gray-50/80 p-2 text-center font-mono-tabular text-[11px]">
-                      <div>
-                        <div className="text-gray-400">轮播</div>
-                        <div className="font-semibold text-gray-900">{item.carouselCount}</div>
-                      </div>
-                      <div>
-                        <div className="text-gray-400">详情</div>
-                        <div className="font-semibold text-gray-900">{item.detailCount}</div>
-                      </div>
-                      <div>
-                        <div className="text-gray-400">SKU图</div>
-                        <div className="font-semibold text-gray-900">
-                          {item.skuImageCount}/{item.skuCount}
-                        </div>
-                      </div>
+                      <Link to={`/listings/${item.id}?assetGroup=carousel`} className={assetGroupLinkClass}>
+                        <span className="block text-gray-600">轮播</span>
+                        <span className="block font-semibold text-gray-900">{item.carouselCount} 张</span>
+                      </Link>
+                      <Link to={`/listings/${item.id}?assetGroup=detail`} className={assetGroupLinkClass}>
+                        <span className="block text-gray-600">详情</span>
+                        <span className="block font-semibold text-gray-900">{item.detailCount} 张</span>
+                      </Link>
+                      <Link
+                        to={`/listings/${item.id}?assetGroup=sku${missingSkuCount > 0 ? "&missingSku=1" : ""}`}
+                        className={assetGroupLinkClass}
+                      >
+                        <span className="block text-gray-600">SKU 图</span>
+                        {missingSkuCount > 0 ? (
+                          <span className="block font-semibold text-amber-800">缺 {missingSkuCount} 张</span>
+                        ) : (
+                          <span className="block font-semibold text-gray-900">
+                            {item.skuImageCount}/{item.skuCount}
+                          </span>
+                        )}
+                      </Link>
                       <div>
                         <div className="text-gray-400">PDP版本</div>
                         <div className="font-semibold text-gray-900">{item.pdpVersionCount}</div>

@@ -32,7 +32,7 @@
 | `POST /api/v1/auth/login` | 公开（限速） | 校验用户名与 scrypt 密码，下发 `HttpOnly` Cookie |
 | `POST /api/v1/auth/logout` | 需登录 | 吊销当前会话并清除 Cookie |
 | `GET /api/v1/auth/me` | 需登录 | 返回当前管理员信息与系统摘要 |
-| `GET /api/v1/dashboard` | 需登录 | 返回真实 DB 统计（商品数、素材数、待审核数、草稿 Listing 数、进行中/失败任务、最近审计活动） |
+| `GET /api/v1/dashboard` | 需登录 | 返回真实 DB 统计（商品数、素材数、草稿 Listing 数、进行中/失败任务、最近审计活动） |
 | `GET /api/v1/settings` | 需登录 | 读取通用设置（时区、默认存储 ID、回收站保留天数、导出 TTL） |
 | `PATCH /api/v1/settings` | 需登录 | 更新可编辑通用设置 |
 | `GET /api/v1/storage/providers` | 需登录 | 列出所有已配置存储（不含密钥），含在线/离线/配置缺失状态与默认标志 |
@@ -54,10 +54,10 @@
 | `GET /api/v1/folders` / `POST /api/v1/folders` / `PATCH /api/v1/folders/:id` / `DELETE /api/v1/folders/:id` | 逻辑目录树管理 |
 | `GET /api/v1/tags` / `POST /api/v1/tags` / `PATCH /api/v1/tags/:id` / `DELETE /api/v1/tags/:id` | 多级标签管理（按维度分组） |
 | `POST /api/v1/assets/upload` | 流式 `multipart/form-data` 上传（支持指定 `productId`、`folderId`、`storageId`、`purpose`、`tagIds`） |
-| `GET /api/v1/assets` | 组合筛选与多语种检索（`q`、`productId`、`storeId`、`market`、`platform`、`purpose`、`type`、`reviewStatus`、`folderId`、`unfiled`、`favorite`、`storageId`、`minWidth`、`dateFrom`、`dateTo`、`sort`、分页） |
+| `GET /api/v1/assets` | 组合筛选与多语种检索（`q`、`productId`、`storeId`、`market`、`platform`、`purpose`、`type`、`folderId`、`unfiled`、`favorite`、`storageId`、`minWidth`、`dateFrom`、`dateTo`、`sort`、分页） |
 | `GET /api/v1/assets/:id` | 素材详情（含版本历史、关联商品、标签、存储状态） |
 | `PATCH /api/v1/assets/:id` | 编辑业务名、目录、用途、收藏、来源、备注、标签、关联商品（不修改原文件） |
-| `POST /api/v1/assets/batch` | 批量操作（移动目录、增删标签、关联商品、批量审核、软删除） |
+| `POST /api/v1/assets/batch` | 批量操作（移动目录、增删标签、关联商品、软删除） |
 | `GET /api/v1/assets/:id/versions/:versionId/content` | 流式原文件下载（`Content-Disposition: attachment`；视频支持 `Range` 206；安全文本/图片预览模式强制严格 `CSP` + `nosniff`） |
 | `GET /api/v1/assets/:id/versions/:versionId/thumbnail` | 读取或按需触发生成本地缩略图缓存 |
 | `POST /api/v1/assets/:id/versions/:versionId/regenerate-thumbnail` | 手动重建损坏/缺失缩略图 |
@@ -80,13 +80,12 @@
 | `GET /api/v1/backups` / `POST /api/v1/backups` | 列出与创建 `metadata` 或 `full` 一致性备份 |
 | `GET /api/v1/backups/:id/download` | 流式下载备份包 |
 
-### M3：母图锁定、多版本审核、店铺、Listing、素材集合与 PDP
+### M3：母图锁定、多版本管理、店铺、Listing、素材集合与 PDP
 
 | Method & Path | 说明 |
 |---|---|
 | `POST /api/v1/assets/:id/versions` | 为已有素材追加不可变新版本（默认 `pending`） |
 | `POST /api/v1/assets/:id/current-version` | 切换当前版本指针（不删历史） |
-| `POST /api/v1/asset-versions/:versionId/review` | 按版本审核（`approved` / `rejected` / `pending` + 备注） |
 | `GET /api/v1/products/:id/master-images` / `POST ...` / `POST .../:masterId/unlock` | 锁定多角度母图、设默认母图、带备注解锁/替换 |
 | `GET /api/v1/dictionaries` / `POST /api/v1/dictionaries` | 平台、市场、语言可配置字典 |
 | `GET/POST/PATCH/DELETE /api/v1/stores` | 店铺 CRUD（同平台同市场支持多店） |

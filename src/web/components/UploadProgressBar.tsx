@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { X } from "lucide-react";
 import type { ImageUploadSizes, UploadTransferProgress } from "../api/client";
 import { formatBytes } from "../utils/format";
@@ -217,13 +218,15 @@ interface PreparedUploadListProps {
   compressEnabled: boolean;
   disabled?: boolean;
   onRemove: (id: string) => void;
+  renderDetails?: (item: PreparedUploadItem, index: number, status: ReturnType<typeof formatPreparedItemStatus>) => ReactNode;
 }
 
 export function PreparedUploadList({
   items,
   compressEnabled,
   disabled = false,
-  onRemove
+  onRemove,
+  renderDetails
 }: PreparedUploadListProps) {
   if (items.length === 0) return null;
 
@@ -232,31 +235,26 @@ export function PreparedUploadList({
       className="max-h-44 space-y-1.5 overflow-y-auto rounded-lg border border-gray-200 p-2"
       data-testid="upload-queue-list"
     >
-      {items.map((item) => {
-        const statusInfo = formatPreparedItemStatus(item, compressEnabled);
+      {items.map((item, index) => {
+        const status = formatPreparedItemStatus(item, compressEnabled);
         return (
-          <div
-            key={item.id}
-            className="flex items-center justify-between gap-2 text-[11px]"
-          >
-            <span className="min-w-0 flex-1 truncate text-gray-800">
-              {item.originalFile.name}
-            </span>
-            <div className="flex shrink-0 items-center gap-1.5">
-              <span className={`font-mono-tabular ${statusInfo.toneClass}`}>
-                {statusInfo.text}
-              </span>
-              {!disabled && (
-                <button
-                  type="button"
-                  aria-label={`移除 ${item.originalFile.name}`}
-                  onClick={() => onRemove(item.id)}
-                  className="rounded p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
-                >
-                  <X className="h-3 w-3" />
-                </button>
-              )}
-            </div>
+          <div key={item.id} className={`flex items-center justify-between gap-2 text-[11px] ${renderDetails ? "flex-wrap" : ""}`}>
+            {renderDetails ? renderDetails(item, index, status) : (
+              <>
+                <span className="min-w-0 flex-1 truncate text-gray-800">{item.originalFile.name}</span>
+                <span className={`shrink-0 font-mono-tabular ${status.toneClass}`}>{status.text}</span>
+              </>
+            )}
+            {!disabled && (
+              <button
+                type="button"
+                aria-label={`移除 ${item.originalFile.name}`}
+                onClick={() => onRemove(item.id)}
+                className="shrink-0 rounded p-0.5 text-gray-400 hover:bg-gray-100 hover:text-gray-600"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            )}
           </div>
         );
       })}

@@ -5,11 +5,11 @@ import path from "node:path";
 import type {
   AssetDetail,
   AssetLinkedProduct,
+  AssetListingUsage,
   AssetListItem,
   AssetType,
   AssetVersionRecord,
   PaginatedResponse,
-  ReviewStatus,
   StorageProviderStatus,
   TagDimension,
   ThumbStatus
@@ -34,6 +34,7 @@ import {
 } from "../media/thumbnail.js";
 import { buildEntitySearchClause, rebuildAssetSearchDocument } from "../search/service.js";
 import { recordActivity } from "../system/activity.js";
+import { getFolderSubtreeIds } from "../taxonomy/service.js";
 
 export interface StagedUploadFile {
   tempPath: string;
@@ -67,8 +68,8 @@ export interface AssetListQuery {
   color?: string;
   tagId?: string;
   type?: AssetType;
-  reviewStatus?: ReviewStatus;
   folderId?: string;
+  includeSubfolders?: boolean;
   unfiled?: boolean;
   favorite?: boolean;
   storageId?: string;
@@ -100,13 +101,10 @@ export interface BatchAssetsInput {
     | "remove_tags"
     | "link_products"
     | "unlink_products"
-    | "set_review_status"
     | "soft_delete";
   folderId?: string | null;
   tagIds?: string[];
   productIds?: string[];
-  reviewStatus?: ReviewStatus;
-  reviewNote?: string;
 }
 
 export interface AppendAssetVersionOptions {
@@ -127,7 +125,6 @@ interface AssetJoinedRow {
   folder_name: string | null;
   current_version_id: string;
   version_no: number;
-  review_status: ReviewStatus;
   thumb_status: ThumbStatus;
   is_favorite: number;
   source: string;
@@ -264,7 +261,6 @@ function mapAssetRow(
     folderName: row.folder_name,
     currentVersionId: row.current_version_id,
     versionNo: row.version_no,
-    reviewStatus: row.review_status,
     thumbStatus: row.thumb_status,
     isFavorite: row.is_favorite === 1,
     source: row.source,
@@ -444,9 +440,9 @@ export async function ingestStagedFile(
       .prepare(
         `INSERT INTO asset_versions (
            id, asset_id, file_id, version_no, original_filename,
-           change_note, prompt_text, review_status, review_note,
+           change_note, prompt_text,
            thumb_status, thumb_key, metadata_json, created_at
-         ) VALUES (?, ?, ?, 1, ?, '', ?, 'pending', '', ?, ?, '{}', ?)`
+         ) VALUES (?, ?, ?, 1, ?, '', ?, ?, ?, '{}', ?)`
       )
       .run(
         versionId,
@@ -610,15 +606,22 @@ export function listAssets(
     clauses.push("a.asset_type = ?");
     params.push(query.type);
   }
-  if (query.reviewStatus) {
-    clauses.push("av.review_status = ?");
-    params.push(query.reviewStatus);
-  }
   if (query.unfiled) {
     clauses.push("a.folder_id IS NULL");
   } else if (query.folderId) {
-    clauses.push("a.folder_id = ?");
-    params.push(query.folderId);
+    if (query.includeSubfolders !== false) {
+      const subtreeIds = getFolderSubtreeIds(db, query.folderId);
+      if (subtreeIds.length <= 1) {
+        clauses.push("a.folder_id = ?");
+        params.push(subtreeIds[0] ?? query.folderId);
+      } else {
+        clauses.push(`a.folder_id IN (${subtreeIds.map(() => "?").join(", ")})`);
+        params.push(...subtreeIds);
+      }
+    } else {
+      clauses.push("a.folder_id = ?");
+      params.push(query.folderId);
+    }
   }
   if (query.favorite) {
     clauses.push("a.is_favorite = 1");
@@ -652,20 +655,19 @@ export function listAssets(
 
   const needsFileFilter = Boolean(query.storageId) || query.minWidth !== undefined;
   const needsFileForOrder = query.sort === "size_desc";
-  const needsVersionForFilter = Boolean(query.reviewStatus) || needsFileFilter;
-  const needsVersionForPage = needsVersionForFilter || needsFileForOrder;
+  const needsFileForPage = needsFileFilter || needsFileForOrder;
 
   const countFrom = `
     FROM assets a
-    ${needsVersionForFilter ? "JOIN asset_versions av ON av.id = a.current_version_id" : ""}
+    ${needsFileFilter ? "JOIN asset_versions av ON av.id = a.current_version_id" : ""}
     ${needsFileFilter ? "JOIN files f ON f.id = av.file_id" : ""}
     WHERE ${whereSql}
   `;
 
   const pageFrom = `
     FROM assets a
-    ${needsVersionForPage ? "JOIN asset_versions av ON av.id = a.current_version_id" : ""}
-    ${needsFileFilter || needsFileForOrder ? "JOIN files f ON f.id = av.file_id" : ""}
+    ${needsFileForPage ? "JOIN asset_versions av ON av.id = a.current_version_id" : ""}
+    ${needsFileForPage ? "JOIN files f ON f.id = av.file_id" : ""}
     WHERE ${whereSql}
   `;
 
@@ -699,7 +701,7 @@ export function listAssets(
       `SELECT
          a.id, a.name, a.original_filename, a.asset_type, a.purpose,
          a.folder_id, fld.name AS folder_name, a.current_version_id,
-         av.version_no, av.review_status, av.thumb_status,
+         av.version_no, av.thumb_status,
          a.is_favorite, a.source, a.source_url, a.notes,
          f.storage_id, sp.status AS storage_status, f.sha256, f.size_bytes,
          f.mime_type, f.ext, f.width, f.height, f.duration_ms,
@@ -735,7 +737,7 @@ export function getAssetDetail(db: AppDatabase, assetId: string): AssetDetail {
       `SELECT
          a.id, a.name, a.original_filename, a.asset_type, a.purpose,
          a.folder_id, fld.name AS folder_name, a.current_version_id,
-         av.version_no, av.review_status, av.thumb_status,
+         av.version_no, av.thumb_status,
          a.is_favorite, a.source, a.source_url, a.notes,
          f.storage_id, sp.status AS storage_status, f.sha256, f.size_bytes,
          f.mime_type, f.ext, f.width, f.height, f.duration_ms,
@@ -757,8 +759,8 @@ export function getAssetDetail(db: AppDatabase, assetId: string): AssetDetail {
     .prepare(
       `SELECT
          av.id, av.asset_id, av.file_id, av.version_no, av.original_filename,
-         av.change_note, av.prompt_text, av.reference_asset_version_id, av.review_status, av.review_note,
-         av.reviewed_at, av.thumb_status, av.created_at,
+         av.change_note, av.prompt_text, av.reference_asset_version_id,
+         av.thumb_status, av.created_at,
          f.storage_id, sp.status AS storage_status, f.sha256, f.size_bytes,
          f.mime_type, f.ext, f.width, f.height, f.duration_ms
        FROM asset_versions av
@@ -776,9 +778,6 @@ export function getAssetDetail(db: AppDatabase, assetId: string): AssetDetail {
     change_note: string;
     prompt_text: string;
     reference_asset_version_id: string | null;
-    review_status: ReviewStatus;
-    review_note: string;
-    reviewed_at: string | null;
     thumb_status: ThumbStatus;
     created_at: string;
     storage_id: string;
@@ -854,9 +853,6 @@ export function getAssetDetail(db: AppDatabase, assetId: string): AssetDetail {
     changeNote: ver.change_note,
     promptText: ver.prompt_text,
     referenceAssetVersionId: ver.reference_asset_version_id,
-    reviewStatus: ver.review_status,
-    reviewNote: ver.review_note,
-    reviewedAt: ver.reviewed_at,
     thumbStatus: ver.thumb_status,
     storageId: ver.storage_id,
     storageStatus: ver.storage_status,
@@ -873,10 +869,31 @@ export function getAssetDetail(db: AppDatabase, assetId: string): AssetDetail {
 
   const tagsMap = loadTagsForAssets(db, [assetId]);
   const productsMap = loadProductsForAssets(db, [assetId]);
+  const listingUsages = db.raw
+    .prepare(
+      `SELECT asi.id AS itemId, lst.id AS listingId, lst.display_name AS listingName,
+              st.id AS storeId, st.name AS storeName, aset.kind, asi.position,
+              av.id AS assetVersionId, av.version_no AS versionNo,
+              asi.listing_sku_id AS listingSkuId, sk.code AS skuCode,
+              ls.channel_code AS skuChannelCode
+       FROM asset_versions av
+       JOIN asset_set_items asi ON asi.asset_version_id = av.id
+       JOIN asset_sets aset ON aset.id = asi.set_id
+       JOIN listings lst ON lst.id = aset.listing_id
+       JOIN stores st ON st.id = lst.store_id
+       LEFT JOIN listing_skus ls ON ls.id = asi.listing_sku_id
+       LEFT JOIN skus sk ON sk.id = ls.sku_id
+       WHERE av.asset_id = ? AND lst.deleted_at IS NULL
+       ORDER BY st.name COLLATE NOCASE, st.id, lst.display_name COLLATE NOCASE, lst.id,
+                CASE aset.kind WHEN 'carousel' THEN 0 WHEN 'detail' THEN 1 WHEN 'sku' THEN 2 ELSE 3 END,
+                asi.position, asi.created_at, asi.id`
+    )
+    .all(assetId) as unknown as AssetListingUsage[];
 
   return {
     ...mapAssetRow(row, tagsMap, productsMap),
-    versions
+    versions,
+    listingUsages
   };
 }
 
@@ -1061,23 +1078,6 @@ export function batchOperateAssets(
         }
         affectedCount += 1;
         rebuildAssetSearchDocument(db, assetId);
-      }
-    } else if (input.action === "set_review_status") {
-      if (!input.reviewStatus) {
-        throw new AppError(400, "VALIDATION_ERROR", "批量审核必须指定审核状态");
-      }
-      const reviewedAt = input.reviewStatus === "pending" ? null : now;
-      const stmt = db.raw.prepare(
-        `UPDATE asset_versions
-         SET review_status = ?, review_note = ?, reviewed_at = ?
-         WHERE id = (SELECT current_version_id FROM assets WHERE id = ? AND deleted_at IS NULL)`
-      );
-      for (const assetId of uniqueIds) {
-        const res = stmt.run(input.reviewStatus, input.reviewNote ?? "", reviewedAt, assetId);
-        if (res.changes > 0) {
-          affectedCount += 1;
-          rebuildAssetSearchDocument(db, assetId);
-        }
       }
     } else if (input.action === "soft_delete") {
       const stmt = db.raw.prepare(
@@ -1350,8 +1350,8 @@ export async function appendAssetVersion(
         `INSERT INTO asset_versions (
            id, asset_id, file_id, version_no, original_filename,
            change_note, prompt_text, reference_asset_version_id,
-           review_status, review_note, thumb_status, thumb_key, metadata_json, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', '', ?, ?, '{}', ?)`
+           thumb_status, thumb_key, metadata_json, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, '{}', ?)`
       )
       .run(
         versionId,
@@ -1440,62 +1440,4 @@ export function switchAssetCurrentVersion(
   });
 
   return getAssetDetail(db, assetId);
-}
-
-export function reviewAssetVersion(
-  db: AppDatabase,
-  actorUserId: string,
-  versionId: string,
-  input: { reviewStatus: ReviewStatus; reviewNote?: string }
-): AssetVersionRecord {
-  const existing = db.raw
-    .prepare(
-      `SELECT av.id, av.asset_id, av.version_no, a.deleted_at
-       FROM asset_versions av
-       JOIN assets a ON a.id = av.asset_id
-       WHERE av.id = ?`
-    )
-    .get(versionId) as
-    | { id: string; asset_id: string; version_no: number; deleted_at: string | null }
-    | undefined;
-
-  if (!existing) {
-    throw new AppError(404, "NOT_FOUND", "素材版本不存在");
-  }
-
-  const now = new Date().toISOString();
-  const reviewedAt = input.reviewStatus === "pending" ? null : now;
-  const reviewNote = input.reviewNote ?? "";
-
-  db.transaction(() => {
-    db.raw
-      .prepare(
-        `UPDATE asset_versions
-         SET review_status = ?, review_note = ?, reviewed_at = ?
-         WHERE id = ?`
-      )
-      .run(input.reviewStatus, reviewNote, reviewedAt, versionId);
-    db.raw
-      .prepare("UPDATE assets SET updated_at = ? WHERE id = ?")
-      .run(now, existing.asset_id);
-    rebuildAssetSearchDocument(db, existing.asset_id);
-    recordActivity(db, {
-      actorUserId,
-      action: "asset_version.review",
-      objectType: "asset_version",
-      objectId: versionId,
-      details: {
-        assetId: existing.asset_id,
-        versionNo: existing.version_no,
-        reviewStatus: input.reviewStatus
-      }
-    });
-  });
-
-  const detail = getAssetDetail(db, existing.asset_id);
-  const updatedVersion = detail.versions.find((ver) => ver.id === versionId);
-  if (!updatedVersion) {
-    throw new AppError(404, "NOT_FOUND", "素材版本不存在");
-  }
-  return updatedVersion;
 }

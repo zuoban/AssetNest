@@ -194,6 +194,7 @@ CREATE TABLE asset_versions (
   change_note TEXT NOT NULL DEFAULT '',
   prompt_text TEXT NOT NULL DEFAULT '',
   reference_asset_version_id TEXT REFERENCES asset_versions(id) ON DELETE SET NULL,
+  -- 兼容旧数据库的历史字段，业务接口与发布预检已停用。
   review_status TEXT NOT NULL DEFAULT 'pending'
     CHECK (review_status IN ('pending', 'approved', 'rejected')),
   review_note TEXT NOT NULL DEFAULT '',
@@ -206,7 +207,6 @@ CREATE TABLE asset_versions (
   UNIQUE (asset_id, version_no)
 );
 CREATE INDEX idx_asset_versions_file ON asset_versions(file_id);
-CREATE INDEX idx_asset_versions_review ON asset_versions(review_status, created_at DESC);
 
 -- 保证 assets.current_version_id 必属于该 asset
 CREATE TRIGGER trg_assets_current_version_check

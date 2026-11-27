@@ -123,6 +123,7 @@ const syncListingSkusSchema = z.object({
 });
 
 const replaceAssetSetSchema = z.object({
+  expectedItemIds: z.array(z.string().uuid()).optional(),
   items: z
     .array(
       z.object({
@@ -283,7 +284,9 @@ export function registerListingRoutes(
       const params = request.params as { id: string; kind: string };
       const kind = assetSetKindSchema.parse(params.kind) as AssetSetKind;
       const body = replaceAssetSetSchema.parse(request.body);
-      return replaceListingAssetSet(db, request.authUser!.id, params.id, kind, body.items);
+      return replaceListingAssetSet(
+        db, request.authUser!.id, params.id, kind, body.items, body.expectedItemIds
+      );
     }
   );
 

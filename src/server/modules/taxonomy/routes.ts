@@ -64,7 +64,15 @@ export function registerTaxonomyRoutes(
 
   app.delete("/api/v1/folders/:id", { preHandler: requireAuth }, async (request) => {
     const { id } = request.params as { id: string };
-    return deleteFolder(db, request.authUser!.id, id);
+    const query = z
+      .object({
+        recursive: z
+          .union([z.boolean(), z.enum(["true", "false", "1", "0"])])
+          .optional()
+          .transform((val) => val === true || val === "true" || val === "1")
+      })
+      .parse(request.query);
+    return deleteFolder(db, request.authUser!.id, id, { recursive: query.recursive });
   });
 
   app.get("/api/v1/tags", { preHandler: requireAuth }, async (request) => {

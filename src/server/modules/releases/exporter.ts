@@ -300,8 +300,8 @@ export async function executeReleaseExportJob(
         "========================================",
         `Release Code: ${detail.releaseCode}`,
         `Release ID: ${detail.id}`,
-        "This package was explicitly exported as an unapproved DRAFT package.",
-        "本压缩包为明确标注的草稿导出包，不得作为已审核正式上架包使用。",
+        "This DRAFT package is for draft use only.",
+        "本压缩包仅供草稿使用。",
         `Blockers at creation: ${detail.blockerCount}`,
         `Warnings at creation: ${detail.warningCount}`,
         ""
@@ -512,7 +512,6 @@ export function buildStandardOpenExportStream(
          av.id AS asset_version_id,
          av.version_no,
          av.original_filename,
-         av.review_status,
          av.created_at AS version_created_at,
          f.storage_id,
          f.object_key,
@@ -539,7 +538,6 @@ export function buildStandardOpenExportStream(
     asset_version_id: string;
     version_no: number;
     original_filename: string;
-    review_status: string;
     version_created_at: string;
     storage_id: string;
     object_key: string;
@@ -625,7 +623,6 @@ export function buildStandardOpenExportStream(
       assetVersionId: row.asset_version_id,
       versionNo: Number(row.version_no),
       originalFilename: row.original_filename,
-      reviewStatus: row.review_status,
       sha256: row.sha256,
       sizeBytes: Number(row.size_bytes),
       mimeType: row.mime_type,

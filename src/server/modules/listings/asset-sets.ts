@@ -4,7 +4,6 @@ import type {
   AssetSetKind,
   AssetType,
   ListingAssetSetsResponse,
-  ReviewStatus,
   StorageProviderStatus,
   ThumbStatus
 } from "../../../shared/types.js";
@@ -62,8 +61,6 @@ interface SetItemJoinedRow {
   current_version_id: string | null;
   latest_version_no: number;
   latest_version_id: string;
-  review_status: ReviewStatus;
-  review_note: string;
   thumb_status: ThumbStatus;
   storage_id: string;
   storage_status: StorageProviderStatus;
@@ -109,7 +106,7 @@ export function getListingAssetSets(
          av.original_filename, av.version_no, a.current_version_id,
          (SELECT MAX(av2.version_no) FROM asset_versions av2 WHERE av2.asset_id = av.asset_id) AS latest_version_no,
          (SELECT av3.id FROM asset_versions av3 WHERE av3.asset_id = av.asset_id ORDER BY av3.version_no DESC LIMIT 1) AS latest_version_id,
-         av.review_status, av.review_note, av.thumb_status,
+         av.thumb_status,
          f.storage_id, sp.status AS storage_status, f.sha256, f.size_bytes,
          f.mime_type, f.ext, f.width, f.height, f.duration_ms,
          asi.listing_sku_id, sk.code AS sku_code, ls.channel_code AS sku_channel_code,
@@ -123,7 +120,7 @@ export function getListingAssetSets(
        LEFT JOIN listing_skus ls ON ls.id = asi.listing_sku_id
        LEFT JOIN skus sk ON sk.id = ls.sku_id
        WHERE s.listing_id = ?
-       ORDER BY s.kind ASC, asi.position ASC, asi.created_at ASC`
+       ORDER BY s.kind ASC, asi.position ASC, asi.created_at ASC, asi.id ASC`
     )
     .all(listingId) as unknown as SetItemJoinedRow[];
 
@@ -169,8 +166,6 @@ export function getListingAssetSets(
         latestVersionId: preferredLatestId,
         latestVersionNo: row.latest_version_no,
         hasNewerVersion,
-        reviewStatus: row.review_status,
-        reviewNote: row.review_note,
         thumbStatus: row.thumb_status,
         storageId: row.storage_id,
         storageStatus: row.storage_status,
@@ -212,7 +207,8 @@ export function replaceListingAssetSet(
   actorUserId: string,
   listingId: string,
   kind: AssetSetKind,
-  items: ReplaceAssetSetItemInput[]
+  items: ReplaceAssetSetItemInput[],
+  expectedItemIds?: string[]
 ): ListingAssetSetsResponse {
   ensureActiveListing(db, listingId);
 
@@ -253,6 +249,17 @@ export function replaceListingAssetSet(
   db.transaction(() => {
     const setMap = ensureListingAssetSetsInTx(db, listingId, now);
     const setId = setMap[kind];
+    if (expectedItemIds) {
+      const current = db.raw
+        .prepare("SELECT id FROM asset_set_items WHERE set_id = ? ORDER BY position, created_at, id")
+        .all(setId) as Array<{ id: string }>;
+      if (
+        current.length !== expectedItemIds.length ||
+        current.some((item, index) => item.id !== expectedItemIds[index])
+      ) {
+        throw new AppError(409, "CONFLICT", "这个图组已在其他页面更新，请检查最新内容后重试");
+      }
+    }
 
     db.raw.prepare("DELETE FROM asset_set_items WHERE set_id = ?").run(setId);
 

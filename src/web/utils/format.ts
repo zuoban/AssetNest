@@ -1,7 +1,6 @@
 import type {
   ListingStatus,
   ProductStatus,
-  ReviewStatus,
   TagDimension
 } from "../../shared/types";
 import type { ImageUploadSizes } from "../api/client";
@@ -56,12 +55,6 @@ export const TAG_DIMENSION_LABELS: Record<TagDimension, string> = {
   scene: "场景",
   color: "颜色",
   custom: "自定义"
-};
-
-export const REVIEW_STATUS_META: Record<ReviewStatus, { label: string; className: string }> = {
-  pending: { label: "待审核", className: "bg-amber-50 text-amber-700 border-amber-200" },
-  approved: { label: "已通过", className: "bg-emerald-50 text-emerald-700 border-emerald-200" },
-  rejected: { label: "已拒绝", className: "bg-rose-50 text-rose-700 border-rose-200" }
 };
 
 export const PRODUCT_STATUS_META: Record<ProductStatus, { label: string; className: string }> = {

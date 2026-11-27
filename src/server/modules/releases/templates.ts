@@ -114,9 +114,6 @@ export const exportTemplateRulesSchema = z.object({
     maxTitleCodePoints: z.number().int().min(1).max(2000),
     requiredFields: z.array(pdpRequiredFieldEnum).max(10)
   }),
-  review: z.object({
-    requireApprovedForFormal: z.boolean()
-  }),
   naming: z.object({
     carouselPrefix: safePrefixSchema,
     mainImageName: safePrefixSchema,
@@ -170,9 +167,6 @@ export const DEFAULT_TEMPLATE_RULES: ExportTemplateRules = {
     maxTitleCodePoints: 120,
     requiredFields: ["title", "description"] as PdpRequiredField[]
   },
-  review: {
-    requireApprovedForFormal: true
-  },
   naming: {
     carouselPrefix: "Carousel",
     mainImageName: "01_Main",
@@ -203,7 +197,6 @@ function parseRules(raw: string): ExportTemplateRules {
       sku: { ...DEFAULT_TEMPLATE_RULES.sku, ...(parsed.sku ?? {}) },
       video: { ...DEFAULT_TEMPLATE_RULES.video, ...(parsed.video ?? {}) },
       pdp: { ...DEFAULT_TEMPLATE_RULES.pdp, ...(parsed.pdp ?? {}) },
-      review: { ...DEFAULT_TEMPLATE_RULES.review, ...(parsed.review ?? {}) },
       naming: { ...DEFAULT_TEMPLATE_RULES.naming, ...(parsed.naming ?? {}) }
     };
     return exportTemplateRulesSchema.parse(merged);

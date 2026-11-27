@@ -1,13 +1,13 @@
 # AssetNest
 
-面向跨境电商卖家的自托管、单容器、低依赖数字资产管理平台（DAM）。基于 SQLite 单体架构，支持 Local / S3 Compatible / WebDAV 可插拔存储，覆盖商品与 SKU、素材库、母图版本审核、多店铺多渠道 Listing、多语种 PDP 文案、版本化导出模板、不可变 Release 上架包与完整备份恢复。
+面向跨境电商卖家的自托管、单容器、低依赖数字资产管理平台（DAM）。基于 SQLite 单体架构，支持 Local / S3 Compatible / WebDAV 可插拔存储，覆盖商品与 SKU、素材库、母图与素材版本、多店铺多渠道 Listing、多语种 PDP 文案、版本化导出模板、不可变 Release 上架包与完整备份恢复。
 
 ## 交付状态（v1.0 / M0–M4 已全部完成）
 
 - **M0（技术基础）**：配置加载校验、SQLite（Node 22 `node:sqlite` + WAL + 版本化迁移）、可选访问码认证（未配置即免登录）、CSRF/限速、宿主机 `revoke-sessions` CLI、单容器 Docker 部署。
 - **M1（素材核心）**：商品/SKU 管理、Local 内容寻址存储与去重、流式上传、文件夹与多级标签、缩略图缓存、安全预览/灯箱/视频 Range 播放、FTS5 中英泰组合检索、回收站与恢复。
 - **M2（存储完整性）**：S3 Compatible / WebDAV 适配器、在线连通性检测、默认存储切换、持久化任务队列 Worker、跨存储断点续传安全迁移、延迟清理队列、引用保护 GC 与一致性备份。
-- **M3（电商多渠道工作流）**：多角度母图锁定与版本历史、按版本独立审核、多店铺与多渠道 Listing、SKU 子集绑定、轮播图拖拽排序、SKU 图/详情图/视频集合、中/英/泰多语种 PDP 文案与历史版本。
+- **M3（电商多渠道工作流）**：多角度母图锁定与版本历史、多店铺与多渠道 Listing、SKU 子集绑定、轮播图拖拽排序、SKU 图/详情图/视频集合、中/英/泰多语种 PDP 文案与历史版本。
 - **M4（交付与加固）**：版本化导出模板、阻断/提醒校验、草稿包与不可变正式 Release、流式 ZIP 上架包与开放标准目录导出、维护模式完整恢复与恶意 ZIP 拦截、50,000 素材性能压测与 AC-01 至 AC-15 全量验收（详见 [`docs/ACCEPTANCE_REPORT.md`](docs/ACCEPTANCE_REPORT.md)）。
 
 ## 快速开始（本地运行）
@@ -48,10 +48,14 @@ pnpm tsx scripts/benchmark-m4.ts
 mkdir -p data config
 cp config/config.example.yaml config/config.yaml
 cp .env.example .env
-docker compose up -d --build
+docker pull ghcr.io/zuoban/assetnest:0.2.0
+docker tag ghcr.io/zuoban/assetnest:0.2.0 assetnest:0.2.0
+docker compose up -d --no-build
 ```
 
-> 若构建环境需要自定义 npm 镜像源，可使用 `docker build --build-arg NPM_REGISTRY=https://registry.npmmirror.com -t assetnest:0.1.0 .`。
+如需从当前源码构建，执行 `docker compose up -d --build`。
+
+> 若构建环境需要自定义 npm 镜像源，可使用 `docker build --build-arg NPM_REGISTRY=https://registry.npmmirror.com -t assetnest:0.2.0 .`。
 
 浏览器访问 `http://127.0.0.1:3000` 即可直接使用系统。健康探针地址：`GET /healthz`。
 
@@ -75,12 +79,14 @@ node dist/server/cli.js revoke-sessions
 ## 升级指南
 
 1. **升级前先做备份**：在「系统设置」页触发一次「完整备份」（或至少触发「元数据备份」）并下载留存。
-2. **停止旧容器并替换镜像**：
+2. **替换镜像**：使用对应版本的 `compose.yaml`，保留现有 `.env`、`config/` 和 `data/`，然后执行：
    ```bash
-   docker compose pull   # 或 docker compose build
-   docker compose up -d
+   docker pull ghcr.io/zuoban/assetnest:0.2.0
+   docker tag ghcr.io/zuoban/assetnest:0.2.0 assetnest:0.2.0
+   docker compose up -d --no-build
    ```
-3. **自动向前迁移**：容器启动时会校验单实例锁并自动按顺序应用 `src/server/db/migrations/` 下新增的 SQL 迁移（当前最新 Schema 版本为 `6`），保留原有 `/data` 与 `/config` 数据；`GET /healthz` 返回 `"dbReady": true` 即升级完成。
+   使用新版源码构建时，执行 `docker compose up -d --build`。
+3. **自动向前迁移**：容器启动时会校验单实例锁并自动按顺序应用 `src/server/db/migrations/` 下新增的 SQL 迁移（当前最新 Schema 版本为 `7`），保留原有 `/data` 与 `/config` 数据；`GET /healthz` 返回 `"dbReady": true` 即升级完成。
 4. **回退说明**：数据库迁移为向前单向执行，如需降级请恢复升级前导出的备份包。
 
 ## 备份与维护模式恢复

@@ -224,7 +224,6 @@ async function uploadAsset(
     contentType?: string;
     productId?: string;
     storageId?: string;
-    approve?: boolean;
   }
 ): Promise<{ id: string; currentVersionId: string; sha256: string }> {
   const parts: Array<
@@ -250,16 +249,6 @@ async function uploadAsset(
   expect(res.statusCode).toBe(201);
   const body = res.json();
   const created = body.items[0];
-
-  if (opts.approve) {
-    const revRes = await runtime.app.inject({
-      method: "POST",
-      url: `/api/v1/asset-versions/${created.currentVersionId}/review`,
-      headers: authHeaders,
-      payload: { reviewStatus: "approved" }
-    });
-    expect(revRes.statusCode).toBe(200);
-  }
 
   return {
     id: created.id,
@@ -296,6 +285,9 @@ describe("M4 API integration (Templates, Preflight, Immutable Releases, ZIP Expo
     expect(listTplRes.statusCode).toBe(200);
     const seededTemplates = listTplRes.json().items as Array<{ id: string; platform: string; market: string }>;
     expect(seededTemplates.length).toBeGreaterThanOrEqual(3);
+    for (const template of listTplRes.json().items) {
+      expect(template.rules).not.toHaveProperty("review");
+    }
 
     const createTplRes = await runtime.app.inject({
       method: "POST",
@@ -351,9 +343,6 @@ describe("M4 API integration (Templates, Preflight, Immutable Releases, ZIP Expo
             maxTitleCodePoints: 60,
             requiredFields: ["title", "description"]
           },
-          review: {
-            requireApprovedForFormal: true
-          },
           naming: {
             carouselPrefix: "carousel",
             mainImageName: "main",
@@ -375,6 +364,11 @@ describe("M4 API integration (Templates, Preflight, Immutable Releases, ZIP Expo
     });
     expect(patchTplRes.statusCode).toBe(200);
     expect(patchTplRes.json().version).toBe(2);
+
+    // Simulate a persisted template from before image review was removed.
+    runtime.db.raw
+      .prepare("UPDATE export_templates SET rules_json = json_set(rules_json, '$.review', json(?)) WHERE id = ?")
+      .run(JSON.stringify({ requireApprovedForFormal: true }), tpl.id);
 
     // 2. Create Store, Product, 3 SKUs, and Listing
     const storeRes = await runtime.app.inject({
@@ -425,21 +419,28 @@ describe("M4 API integration (Templates, Preflight, Immutable Releases, ZIP Expo
     const listingSkus = listing.skus as Array<{ id: string; skuCode: string }>;
     expect(listingSkus.length).toBe(3);
 
-    // 3. Upload 1 pending image & put it in carousel (missing SKU images, missing detail, missing PDP, pending review, <9 carousel)
-    const pendingImg = await uploadAsset(runtime, authHeaders, {
-      filename: "pending-01.png",
+    // 3. An incomplete listing still fails SKU, detail, and PDP checks.
+    const firstCarouselImage = await uploadAsset(runtime, authHeaders, {
+      filename: "first-carousel.png",
       data: await makePng(10, 20, 30, 800, 800),
-      productId: product.id,
-      approve: false
+      productId: product.id
     });
 
-    const setAddPendingRes = await runtime.app.inject({
+    const setAddCarouselRes = await runtime.app.inject({
       method: "PUT",
       url: `/api/v1/listings/${listing.id}/asset-sets/carousel`,
       headers: authHeaders,
-      payload: { items: [{ assetVersionId: pendingImg.currentVersionId }] }
+      payload: { items: [{ assetVersionId: firstCarouselImage.currentVersionId }], expectedItemIds: [] }
     });
-    expect(setAddPendingRes.statusCode).toBe(200);
+    expect(setAddCarouselRes.statusCode).toBe(200);
+
+    const staleSetRes = await runtime.app.inject({
+      method: "PUT",
+      url: `/api/v1/listings/${listing.id}/asset-sets/carousel`,
+      headers: authHeaders,
+      payload: { items: [], expectedItemIds: [] }
+    });
+    expect(staleSetRes.statusCode).toBe(409);
 
     const valBlockedRes = await runtime.app.inject({
       method: "POST",
@@ -452,8 +453,13 @@ describe("M4 API integration (Templates, Preflight, Immutable Releases, ZIP Expo
     expect(valBlocked.canCreateFormalRelease).toBe(false);
     const blockerCodes = valBlocked.blockers.map((b: { code: string }) => b.code);
     const warningCodes = valBlocked.warnings.map((w: { code: string }) => w.code);
-    expect(blockerCodes).toContain("REVIEW_PENDING");
-    expect(blockerCodes).toContain("SKU_IMAGE_MISSING");
+    expect(valBlocked.blockers).toEqual(expect.arrayContaining([
+      ...listingSkus.map((sku) => expect.objectContaining({
+        code: "SKU_IMAGE_MISSING",
+        targetKind: "sku",
+        targetId: sku.id
+      }))
+    ]));
     expect(blockerCodes).toContain("DETAIL_COUNT_TOO_LOW");
     expect(blockerCodes).toContain("PDP_REQUIRED_FIELD_MISSING");
     expect(warningCodes).toContain("CAROUSEL_BELOW_TARGET");
@@ -472,7 +478,7 @@ describe("M4 API integration (Templates, Preflight, Immutable Releases, ZIP Expo
       method: "POST",
       url: `/api/v1/listings/${listing.id}/releases`,
       headers: authHeaders,
-      payload: { templateId: tpl.id, isDraftPackage: true, note: "内部审核草稿包" }
+      payload: { templateId: tpl.id, isDraftPackage: true, note: "内部草稿包" }
     });
     expect(draftReleaseRes.statusCode).toBe(201);
     const draftRelease = draftReleaseRes.json();
@@ -505,11 +511,17 @@ describe("M4 API integration (Templates, Preflight, Immutable Releases, ZIP Expo
       const asset = await uploadAsset(runtime, authHeaders, {
         filename: `carousel-0${i}.png`,
         data: await makePng(20 * i, 40, 200 - i * 10, 800, 800),
-        productId: product.id,
-        approve: true
+        productId: product.id
       });
       carouselAssets.push(asset);
     }
+
+    // Legacy review statuses remain in storage but do not affect formal release validation.
+    const setLegacyReviewStatus = runtime.db.raw.prepare(
+      "UPDATE asset_versions SET review_status = ?, review_note = ? WHERE id = ?"
+    );
+    setLegacyReviewStatus.run("pending", "legacy pending", carouselAssets[0]!.currentVersionId);
+    setLegacyReviewStatus.run("rejected", "legacy rejection", carouselAssets[1]!.currentVersionId);
 
     const addCarouselRes = await runtime.app.inject({
       method: "PUT",
@@ -520,6 +532,12 @@ describe("M4 API integration (Templates, Preflight, Immutable Releases, ZIP Expo
       }
     });
     expect(addCarouselRes.statusCode).toBe(200);
+    const rejectedItem = addCarouselRes.json().sets.carousel.items.find(
+      (item: { assetVersionId: string }) => item.assetVersionId === carouselAssets[1]!.currentVersionId
+    );
+    expect(rejectedItem).toBeDefined();
+    expect(rejectedItem).not.toHaveProperty("reviewStatus");
+    expect(rejectedItem).not.toHaveProperty("reviewNote");
 
     const skuSetItems: Array<{ assetVersionId: string; listingSkuId: string }> = [];
     for (let i = 0; i < listingSkus.length; i++) {
@@ -527,8 +545,7 @@ describe("M4 API integration (Templates, Preflight, Immutable Releases, ZIP Expo
       const asset = await uploadAsset(runtime, authHeaders, {
         filename: `sku-${ls.skuCode}.png`,
         data: await makePng(100 + i * 30, 120, 80, 800, 800),
-        productId: product.id,
-        approve: true
+        productId: product.id
       });
       skuSetItems.push({ assetVersionId: asset.currentVersionId, listingSkuId: ls.id });
     }
@@ -543,8 +560,7 @@ describe("M4 API integration (Templates, Preflight, Immutable Releases, ZIP Expo
     const detailAsset = await uploadAsset(runtime, authHeaders, {
       filename: "detail-banner.png",
       data: await makePng(50, 150, 180, 800, 1200),
-      productId: product.id,
-      approve: true
+      productId: product.id
     });
     const addDetailRes = await runtime.app.inject({
       method: "PUT",
@@ -604,6 +620,7 @@ describe("M4 API integration (Templates, Preflight, Immutable Releases, ZIP Expo
     const formalRelease = formalReleaseRes.json();
     expect(formalRelease.isDraftPackage).toBe(false);
     expect(formalRelease.pdpVersionId).toBeTruthy();
+    expect(formalRelease.snapshot.template.rules).not.toHaveProperty("review");
     expect(formalRelease.assets).toHaveLength(13); // 9 carousel + 3 SKU + 1 detail
 
     const formalExportRes = await runtime.app.inject({
@@ -667,7 +684,36 @@ describe("M4 API integration (Templates, Preflight, Immutable Releases, ZIP Expo
       originalHashes.set(item.relativePath, actualHash);
     }
 
-    // 6. Mutate draft Listing & upload new version to carousel asset -> re-export old Release must remain 100% identical
+    // Insert a historical Release fixture with frozen review rules without changing any saved Release.
+    const legacyReleaseId = crypto.randomUUID();
+    const legacySnapshot = {
+      ...formalRelease.snapshot,
+      template: {
+        ...formalRelease.snapshot.template,
+        rules: { ...formalRelease.snapshot.template.rules, review: { requireApprovedForFormal: true } }
+      }
+    };
+    runtime.db.transaction(() => {
+      runtime.db.raw.prepare(`
+        INSERT INTO releases (
+          id, listing_id, release_no, release_code, is_draft_package, template_id, template_version,
+          pdp_version_id, validation_summary_json, immutable_snapshot_json, note, created_at
+        )
+        SELECT ?, listing_id, release_no + 1, ?, is_draft_package, template_id, template_version,
+               pdp_version_id, validation_summary_json, ?, note, created_at
+        FROM releases WHERE id = ?
+      `).run(legacyReleaseId, `${formalRelease.releaseCode}-legacy`, JSON.stringify(legacySnapshot), formalRelease.id);
+      runtime.db.raw.prepare(`
+        INSERT INTO release_assets (
+          id, release_id, asset_version_id, kind, listing_sku_code, position, export_relative_path, sha256, size_bytes
+        )
+        SELECT lower(hex(randomblob(16))), ?, asset_version_id, kind, listing_sku_code, position,
+               export_relative_path, sha256, size_bytes
+        FROM release_assets WHERE release_id = ?
+      `).run(legacyReleaseId, formalRelease.id);
+    });
+
+    // 6. Changes to the live listing and asset version preserve the historical export's contents.
     await runtime.app.inject({
       method: "PUT",
       url: `/api/v1/listings/${listing.id}/pdp/draft`,
@@ -707,7 +753,7 @@ describe("M4 API integration (Templates, Preflight, Immutable Releases, ZIP Expo
 
     const reExportRes = await runtime.app.inject({
       method: "POST",
-      url: `/api/v1/releases/${formalRelease.id}/exports`,
+      url: `/api/v1/releases/${legacyReleaseId}/exports`,
       headers: authHeaders,
       payload: {}
     });
@@ -742,10 +788,18 @@ describe("M4 API integration (Templates, Preflight, Immutable Releases, ZIP Expo
         .run(formalRelease.id)
     ).toThrow(/immutable|cannot be (updated|deleted)/i);
 
-    // 8. Restore historical Release as a brand-new independent draft Listing
+    // 8. Read the frozen historical snapshot and restore it as an independent draft.
+    const legacyDetailRes = await runtime.app.inject({
+      method: "GET",
+      url: `/api/v1/releases/${legacyReleaseId}`,
+      headers: authHeaders
+    });
+    expect(legacyDetailRes.statusCode).toBe(200);
+    expect(legacyDetailRes.json().snapshot).toEqual(legacySnapshot);
+
     const restoreDraftRes = await runtime.app.inject({
       method: "POST",
-      url: `/api/v1/releases/${formalRelease.id}/restore-draft`,
+      url: `/api/v1/releases/${legacyReleaseId}/restore-draft`,
       headers: authHeaders,
       payload: { displayName: "从 Release 恢复的新草稿" }
     });
@@ -762,6 +816,15 @@ describe("M4 API integration (Templates, Preflight, Immutable Releases, ZIP Expo
     });
     expect(restoredPdpRes.json().draft.content.title).toBe(thaiTitle);
 
+    const restoredSetsRes = await runtime.app.inject({
+      method: "GET",
+      url: `/api/v1/listings/${restoredDraft.id}/asset-sets`,
+      headers: authHeaders
+    });
+    expect(restoredSetsRes.statusCode).toBe(200);
+    expect(restoredSetsRes.json().sets.carousel.items.map((item: { assetVersionId: string }) => item.assetVersionId))
+      .toEqual(carouselAssets.map((asset) => asset.currentVersionId));
+
     // 9. Standard Open Export ZIP (no vendor lock-in)
     const stdRes = await runtime.app.inject({
       method: "POST",
@@ -775,6 +838,7 @@ describe("M4 API integration (Templates, Preflight, Immutable Releases, ZIP Expo
     const stdManifest = JSON.parse(stdEntries.get("manifest.json")!.toString("utf8"));
     expect(stdManifest.fileCount).toBeGreaterThanOrEqual(13);
     for (const f of stdManifest.files as Array<{ relativePath: string; sha256: string }>) {
+      expect(f).not.toHaveProperty("reviewStatus");
       expect(sha256Hex(stdEntries.get(f.relativePath)!)).toBe(f.sha256);
     }
   });
@@ -824,14 +888,12 @@ describe("M4 API integration (Templates, Preflight, Immutable Releases, ZIP Expo
     const protectedAsset = await uploadAsset(runtime, authHeaders, {
       filename: "protected.png",
       data: await makePng(12, 34, 56, 800, 800),
-      productId: product.id,
-      approve: true
+      productId: product.id
     });
     const orphanAsset = await uploadAsset(runtime, authHeaders, {
       filename: "orphan.png",
       data: await makePng(99, 88, 77, 800, 800),
-      productId: product.id,
-      approve: true
+      productId: product.id
     });
 
     await runtime.app.inject({
@@ -967,15 +1029,13 @@ describe("M4 API integration (Templates, Preflight, Immutable Releases, ZIP Expo
       filename: "coffee-local.png",
       data: await makePng(40, 25, 15, 600, 600),
       productId: product.id,
-      storageId: "local",
-      approve: true
+      storageId: "local"
     });
     const s3Asset = await uploadAsset(instA.runtime, instA.authHeaders, {
       filename: "coffee-s3.png",
       data: await makePng(200, 150, 90, 600, 600),
       productId: product.id,
-      storageId: "s3_main",
-      approve: true
+      storageId: "s3_main"
     });
 
     const listing = (
@@ -1278,8 +1338,7 @@ describe("M4 API integration (Templates, Preflight, Immutable Releases, ZIP Expo
       filename: "remote-pic.png",
       data: await makePng(60, 120, 180, 800, 800),
       productId: product.id,
-      storageId: "s3_main",
-      approve: true
+      storageId: "s3_main"
     });
     const listing = (
       await runtime.app.inject({
@@ -1324,10 +1383,14 @@ describe("M4 API integration (Templates, Preflight, Immutable Releases, ZIP Expo
       })
     ).json();
     expect(valOffline.canCreateFormalRelease).toBe(false);
-    const offlineCodes = valOffline.blockers.map((b: { code: string }) => b.code);
-    expect(
-      offlineCodes.includes("STORAGE_OFFLINE") || offlineCodes.includes("STORAGE_READ_FAILED")
-    ).toBe(true);
+    const offlineIssue = valOffline.blockers.find(
+      (issue: { code: string }) => issue.code === "STORAGE_OFFLINE" || issue.code === "STORAGE_READ_FAILED"
+    );
+    expect(offlineIssue).toMatchObject({
+      targetKind: "storage",
+      targetId: s3Asset.currentVersionId,
+      details: { assetGroup: "carousel" }
+    });
 
     // Export job fails cleanly with no leftover .tmp files
     const expFailRes = await runtime.app.inject({

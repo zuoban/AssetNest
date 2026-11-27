@@ -155,7 +155,7 @@ afterEach(async () => {
 });
 
 describe("M3 API integration (Master Images, Versions, Multi-Store Listings, Asset Sets, Multilingual PDP)", () => {
-  it("AC-05: locks multi-angle master images to immutable versions, preserves history on new version upload, supports independent per-version review, and enforces unlock reason", async () => {
+  it("AC-05: locks multi-angle master images to immutable versions, preserves history on new version upload, and enforces unlock reason", async () => {
     const { runtime, cookie, authHeaders } = await bootAuthedApp();
 
     const prodRes = await runtime.app.inject({
@@ -250,7 +250,7 @@ describe("M3 API integration (Master Images, Versions, Multi-Store Listings, Ass
     expect(appendRes.statusCode).toBe(201);
     const appendBody = appendRes.json();
     expect(appendBody.version.versionNo).toBe(2);
-    expect(appendBody.version.reviewStatus).toBe("pending");
+    expect(appendBody.version).not.toHaveProperty("reviewStatus");
     expect(appendBody.asset.currentVersionId).toBe(appendBody.version.id);
     expect(appendBody.asset.versions).toHaveLength(2);
 
@@ -266,27 +266,17 @@ describe("M3 API integration (Master Images, Versions, Multi-Store Listings, Ass
     expect(pinnedFront.assetVersionId).toBe(frontImgV1.currentVersionId);
     expect(pinnedFront.versionNo).toBe(1);
     expect(pinnedFront.latestVersionNo).toBe(2);
+    expect(pinnedFront).not.toHaveProperty("reviewStatus");
 
-    // Review V2 independently without mutating V1
-    const reviewV2Approve = await runtime.app.inject({
+    const removedReviewRoute = await runtime.app.inject({
       method: "POST",
       url: `/api/v1/asset-versions/${appendBody.version.id}/review`,
       headers: authHeaders,
-      payload: { reviewStatus: "approved", reviewNote: "与母图比例一致" }
+      payload: { reviewStatus: "approved" }
     });
-    expect(reviewV2Approve.statusCode).toBe(200);
-    expect(reviewV2Approve.json().reviewStatus).toBe("approved");
+    expect(removedReviewRoute.statusCode).toBe(404);
 
-    const reviewV2Reject = await runtime.app.inject({
-      method: "POST",
-      url: `/api/v1/asset-versions/${appendBody.version.id}/review`,
-      headers: authHeaders,
-      payload: { reviewStatus: "rejected", reviewNote: "杯盖颜色偏暖" }
-    });
-    expect(reviewV2Reject.statusCode).toBe(200);
-    expect(reviewV2Reject.json().reviewStatus).toBe("rejected");
-
-    // Verify V1 is still pending & carries lockedMasterProducts metadata
+    // Verify V1 still carries lockedMasterProducts metadata
     const assetDetailRes = await runtime.app.inject({
       method: "GET",
       url: `/api/v1/assets/${frontImgV1.id}`,
@@ -296,11 +286,12 @@ describe("M3 API integration (Master Images, Versions, Multi-Store Listings, Ass
     const assetDetail = assetDetailRes.json();
     const v1Record = assetDetail.versions.find((v: { versionNo: number }) => v.versionNo === 1);
     const v2Record = assetDetail.versions.find((v: { versionNo: number }) => v.versionNo === 2);
-    expect(v1Record.reviewStatus).toBe("pending");
     expect(v1Record.lockedMasterProducts).toHaveLength(1);
     expect(v1Record.lockedMasterProducts[0].angle).toBe("front");
-    expect(v2Record.reviewStatus).toBe("rejected");
-    expect(v2Record.reviewNote).toBe("杯盖颜色偏暖");
+    expect(v2Record.id).toBe(appendBody.version.id);
+    expect(v2Record.lockedMasterProducts).toHaveLength(0);
+    expect(v2Record).not.toHaveProperty("reviewNote");
+    expect(v2Record).not.toHaveProperty("reviewedAt");
 
     // Switch current version back to V1 without losing V2
     const switchRes = await runtime.app.inject({
@@ -495,6 +486,18 @@ describe("M3 API integration (Master Images, Versions, Multi-Store Listings, Ass
       carouselAssets.push(img);
     }
 
+    const getAssetUsages = async (assetId: string) => {
+      const res = await runtime.app.inject({
+        method: "GET",
+        url: `/api/v1/assets/${assetId}`,
+        headers: authHeaders
+      });
+      expect(res.statusCode).toBe(200);
+      return res.json().listingUsages;
+    };
+    expect(carouselAssets[0].products).toEqual([expect.objectContaining({ id: product.id })]);
+    expect(await getAssetUsages(carouselAssets[0].id)).toEqual([]);
+
     // Save 9-item carousel on PH Shopee, then reverse order and verify persistence
     const initialSetRes = await runtime.app.inject({
       method: "PUT",
@@ -567,6 +570,21 @@ describe("M3 API integration (Master Images, Versions, Multi-Store Listings, Ass
     });
     expect(storeFilteredAssets.statusCode).toBe(200);
     expect(storeFilteredAssets.json().total).toBe(9);
+    expect(storeFilteredAssets.json().items[0]).not.toHaveProperty("listingUsages");
+
+    const detailSet = await runtime.app.inject({
+      method: "PUT",
+      url: `/api/v1/listings/${listingPhTiktok.id}/asset-sets/detail`,
+      headers: authHeaders,
+      payload: {
+        items: [
+          { assetVersionId: firstAssetV2Id },
+          { assetVersionId: carouselAssets[0].currentVersionId },
+          { assetVersionId: firstAsset.currentVersionId }
+        ]
+      }
+    });
+    expect(detailSet.statusCode).toBe(200);
 
     // Per-SKU image binding & replacement isolation
     const phListingSku0 = phShopeeDetail.skus[0];
@@ -578,11 +596,21 @@ describe("M3 API integration (Master Images, Versions, Multi-Store Listings, Ass
       payload: {
         items: [
           { assetVersionId: carouselAssets[0].currentVersionId, listingSkuId: phListingSku0.id },
-          { assetVersionId: carouselAssets[1].currentVersionId, listingSkuId: phListingSku1.id }
+          { assetVersionId: carouselAssets[1].currentVersionId, listingSkuId: phListingSku1.id },
+          { assetVersionId: carouselAssets[2].currentVersionId, listingSkuId: phListingSku1.id }
         ]
       }
     });
     expect(skuSet1.statusCode).toBe(200);
+    const listingCoverage = await runtime.app.inject({
+      method: "GET",
+      url: `/api/v1/listings?storeId=${storePhShopee.id}`,
+      headers: authHeaders
+    });
+    expect(listingCoverage.statusCode).toBe(200);
+    expect(listingCoverage.json().items).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: listingPhShopee.id, skuImageCount: 2 })
+    ]));
 
     // Replace only sku0's image with firstAssetV2Id
     const skuSet2 = await runtime.app.inject({
@@ -591,8 +619,8 @@ describe("M3 API integration (Master Images, Versions, Multi-Store Listings, Ass
       headers: authHeaders,
       payload: {
         items: [
-          { assetVersionId: firstAssetV2Id, listingSkuId: phListingSku0.id },
-          { assetVersionId: carouselAssets[1].currentVersionId, listingSkuId: phListingSku1.id }
+          { assetVersionId: carouselAssets[1].currentVersionId, listingSkuId: phListingSku1.id },
+          { assetVersionId: firstAssetV2Id, listingSkuId: phListingSku0.id }
         ]
       }
     });
@@ -604,6 +632,49 @@ describe("M3 API integration (Master Images, Versions, Multi-Store Listings, Ass
     expect(skuItems.find((i: { listingSkuId: string }) => i.listingSkuId === phListingSku1.id).assetVersionId).toBe(
       carouselAssets[1].currentVersionId
     );
+
+    const currentUsages = await getAssetUsages(firstAsset.id);
+    expect(currentUsages).toEqual([
+      {
+        itemId: slot0.id,
+        listingId: listingPhShopee.id,
+        listingName: listingPhShopee.displayName,
+        storeId: storePhShopee.id,
+        storeName: storePhShopee.name,
+        kind: "carousel",
+        position: 0,
+        assetVersionId: firstAsset.currentVersionId,
+        versionNo: 1,
+        listingSkuId: null,
+        skuCode: null,
+        skuChannelCode: null
+      },
+      expect.objectContaining({
+        listingId: listingPhShopee.id,
+        kind: "sku",
+        position: 1,
+        assetVersionId: firstAssetV2Id,
+        versionNo: 2,
+        listingSkuId: phListingSku0.id,
+        skuCode: phListingSku0.skuCode,
+        skuChannelCode: phListingSku0.channelCode
+      }),
+      expect.objectContaining({
+        listingId: listingPhTiktok.id,
+        storeId: storePhTiktok.id,
+        kind: "detail",
+        position: 0,
+        assetVersionId: firstAssetV2Id,
+        versionNo: 2
+      }),
+      expect.objectContaining({
+        listingId: listingPhTiktok.id,
+        kind: "detail",
+        position: 2,
+        assetVersionId: firstAsset.currentVersionId,
+        versionNo: 1
+      })
+    ]);
 
     // Cross-listing listing_sku_id must be rejected
     const tiktokListingSku0 = listingPhTiktok.skus[0];
@@ -767,6 +838,10 @@ describe("M3 API integration (Master Images, Versions, Multi-Store Listings, Ass
       headers: authHeaders
     });
     expect(origSetsAfterDupEdit.json().sets.carousel.items).toHaveLength(9);
+    const usagesBeforeDelete = await getAssetUsages(carouselAssets[0].id);
+    expect(usagesBeforeDelete).toEqual(
+      expect.arrayContaining([expect.objectContaining({ listingId: dupListing.id, kind: "carousel" })])
+    );
 
     // Listing soft-delete -> Trash -> Restore
     const delListingRes = await runtime.app.inject({
@@ -775,6 +850,9 @@ describe("M3 API integration (Master Images, Versions, Multi-Store Listings, Ass
       headers: authHeaders
     });
     expect(delListingRes.statusCode).toBe(200);
+    expect(await getAssetUsages(carouselAssets[0].id)).not.toEqual(
+      expect.arrayContaining([expect.objectContaining({ listingId: dupListing.id })])
+    );
 
     const trashRes = await runtime.app.inject({
       method: "GET",
@@ -792,6 +870,7 @@ describe("M3 API integration (Master Images, Versions, Multi-Store Listings, Ass
     });
     expect(restoreListingRes.statusCode).toBe(200);
     expect(restoreListingRes.json().restoredCount).toBe(1);
+    expect(await getAssetUsages(carouselAssets[0].id)).toEqual(usagesBeforeDelete);
 
     const restoredListingRes = await runtime.app.inject({
       method: "GET",

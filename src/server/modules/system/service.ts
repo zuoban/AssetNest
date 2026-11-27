@@ -327,26 +327,10 @@ export function listActivities(
 }
 
 export function getDashboardSummary(db: AppDatabase): DashboardResponse {
-  let pendingReviews = 0;
-  try {
-    const row = db.raw
-      .prepare(
-        `SELECT COUNT(*) AS count
-         FROM asset_versions av
-         JOIN assets a ON a.id = av.asset_id
-         WHERE av.review_status = 'pending' AND a.deleted_at IS NULL`
-      )
-      .get() as { count: number };
-    pendingReviews = Number(row.count ?? 0);
-  } catch {
-    pendingReviews = 0;
-  }
-
   return {
     counts: {
       products: safeTableCount(db, "products", "deleted_at IS NULL"),
       assets: safeTableCount(db, "assets", "deleted_at IS NULL"),
-      pendingReviews,
       draftListings: safeTableCount(db, "listings", "deleted_at IS NULL AND status = 'draft'"),
       runningJobs: safeTableCount(db, "jobs", "status IN ('queued', 'running')"),
       failedJobs: safeTableCount(db, "jobs", "status = 'failed'")
