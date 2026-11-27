@@ -2,6 +2,8 @@ import crypto from "node:crypto";
 import fs from "node:fs";
 import fsp from "node:fs/promises";
 import path from "node:path";
+import { Transform, type Readable, type Writable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import type { ResolvedAppConfig } from "../../config/schema.js";
@@ -140,32 +142,125 @@ async function measureDirectoryBytes(dirPath: string): Promise<number> {
   return total;
 }
 
-function parseHttpRange(
+export function parseHttpRange(
   header: string | undefined,
   totalSize: number
 ): { start: number; end: number } | null {
-  if (!header || !header.startsWith("bytes=")) {
+  if (!header || !header.startsWith("bytes=") || totalSize <= 0) {
     return null;
   }
   const rangeSpec = header.slice("bytes=".length).split(",")[0]?.trim();
   if (!rangeSpec) {
     return null;
   }
-  const [startStr, endStr] = rangeSpec.split("-");
+  const dashParts = rangeSpec.split("-");
+  if (dashParts.length !== 2) {
+    return null;
+  }
+  const [startStr, endStr] = dashParts;
   if (startStr === "" && endStr) {
+    if (!/^\d+$/.test(endStr)) {
+      return null;
+    }
     const suffixLength = Number.parseInt(endStr, 10);
-    if (!Number.isFinite(suffixLength) || suffixLength <= 0) {
+    if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0) {
       return null;
     }
     const start = Math.max(totalSize - suffixLength, 0);
-    return { start, end: Math.max(totalSize - 1, 0) };
+    return { start, end: totalSize - 1 };
   }
-  const start = Number.parseInt(startStr ?? "", 10);
+  if (!startStr || !/^\d+$/.test(startStr)) {
+    return null;
+  }
+  if (endStr && !/^\d+$/.test(endStr)) {
+    return null;
+  }
+  const start = Number.parseInt(startStr, 10);
   const end = endStr ? Number.parseInt(endStr, 10) : totalSize - 1;
-  if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || start > end || start >= totalSize) {
+  if (
+    !Number.isSafeInteger(start) ||
+    !Number.isSafeInteger(end) ||
+    start < 0 ||
+    start > end ||
+    start >= totalSize
+  ) {
     return null;
   }
   return { start, end: Math.min(end, totalSize - 1) };
+}
+
+export interface MultipartFileStream extends Readable {
+  truncated?: boolean;
+}
+
+export async function stageMultipartFileToTemp(
+  fileStream: MultipartFileStream,
+  options: {
+    tempDir: string;
+    originalFilename: string;
+    declaredMime: string;
+    maxFileBytes: number;
+    maxFileSizeMB: number;
+    createWriteStream?: (tempPath: string) => Writable;
+  }
+): Promise<StagedUploadFile> {
+  const tempPath = path.join(options.tempDir, `${crypto.randomUUID()}.upload`);
+  const hash = crypto.createHash("sha256");
+  const headerChunks: Buffer[] = [];
+  let headerBytes = 0;
+  let sizeBytes = 0;
+
+  const inspectStream = new Transform({
+    transform(chunk, _encoding, callback) {
+      const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      sizeBytes += buf.length;
+      if (sizeBytes > options.maxFileBytes) {
+        callback(
+          new AppError(
+            413,
+            "PAYLOAD_TOO_LARGE",
+            `单文件大小超过上限（${options.maxFileSizeMB} MB）`
+          )
+        );
+        return;
+      }
+      hash.update(buf);
+      if (headerBytes < 8192) {
+        const need = Math.min(8192 - headerBytes, buf.length);
+        headerChunks.push(buf.subarray(0, need));
+        headerBytes += need;
+      }
+      callback(null, buf);
+    }
+  });
+
+  const writeStream = options.createWriteStream
+    ? options.createWriteStream(tempPath)
+    : fs.createWriteStream(tempPath, { flags: "wx", mode: 0o640 });
+
+  try {
+    await pipeline(fileStream, inspectStream, writeStream);
+
+    if (fileStream.truncated) {
+      throw new AppError(
+        413,
+        "PAYLOAD_TOO_LARGE",
+        `单文件大小超过上限（${options.maxFileSizeMB} MB）`
+      );
+    }
+
+    return {
+      tempPath,
+      originalFilename: options.originalFilename || "unnamed",
+      declaredMime: options.declaredMime || "application/octet-stream",
+      sha256: hash.digest("hex"),
+      sizeBytes,
+      header: Buffer.concat(headerChunks)
+    };
+  } catch (err) {
+    await fsp.rm(tempPath, { force: true }).catch(() => {});
+    throw err;
+  }
 }
 
 function encodeContentDisposition(disposition: "attachment" | "inline", filename: string): string {
@@ -214,61 +309,14 @@ export function registerAssetRoutes(
           continue;
         }
 
-        const tempPath = path.join(tempDir, `${crypto.randomUUID()}.upload`);
-        const hash = crypto.createHash("sha256");
-        const headerChunks: Buffer[] = [];
-        let headerBytes = 0;
-        let sizeBytes = 0;
-        const writeStream = fs.createWriteStream(tempPath, { flags: "wx", mode: 0o640 });
-
-        try {
-          for await (const chunk of part.file) {
-            const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-            sizeBytes += buf.length;
-            if (sizeBytes > maxFileBytes) {
-              throw new AppError(
-                413,
-                "PAYLOAD_TOO_LARGE",
-                `单文件大小超过上限（${config.uploads.maxFileSizeMB} MB）`
-              );
-            }
-            hash.update(buf);
-            if (headerBytes < 8192) {
-              const need = Math.min(8192 - headerBytes, buf.length);
-              headerChunks.push(buf.subarray(0, need));
-              headerBytes += need;
-            }
-            if (!writeStream.write(buf)) {
-              await new Promise<void>((resolve) => writeStream.once("drain", resolve));
-            }
-          }
-
-          await new Promise<void>((resolve, reject) => {
-            writeStream.on("error", reject);
-            writeStream.end(() => resolve());
-          });
-
-          if (part.file.truncated) {
-            throw new AppError(
-              413,
-              "PAYLOAD_TOO_LARGE",
-              `单文件大小超过上限（${config.uploads.maxFileSizeMB} MB）`
-            );
-          }
-
-          stagedFiles.push({
-            tempPath,
-            originalFilename: part.filename || "unnamed",
-            declaredMime: part.mimetype || "application/octet-stream",
-            sha256: hash.digest("hex"),
-            sizeBytes,
-            header: Buffer.concat(headerChunks)
-          });
-        } catch (err) {
-          writeStream.destroy();
-          await fsp.rm(tempPath, { force: true }).catch(() => {});
-          throw err;
-        }
+        const staged = await stageMultipartFileToTemp(part.file, {
+          tempDir,
+          originalFilename: part.filename || "unnamed",
+          declaredMime: part.mimetype || "application/octet-stream",
+          maxFileBytes,
+          maxFileSizeMB: config.uploads.maxFileSizeMB
+        });
+        stagedFiles.push(staged);
       }
 
       if (stagedFiles.length === 0) {
@@ -385,61 +433,13 @@ export function registerAssetRoutes(
           continue;
         }
 
-        const tempPath = path.join(tempDir, `${crypto.randomUUID()}.upload`);
-        const hash = crypto.createHash("sha256");
-        const headerChunks: Buffer[] = [];
-        let headerBytes = 0;
-        let sizeBytes = 0;
-        const writeStream = fs.createWriteStream(tempPath, { flags: "wx", mode: 0o640 });
-
-        try {
-          for await (const chunk of part.file) {
-            const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-            sizeBytes += buf.length;
-            if (sizeBytes > maxFileBytes) {
-              throw new AppError(
-                413,
-                "PAYLOAD_TOO_LARGE",
-                `单文件大小超过上限（${config.uploads.maxFileSizeMB} MB）`
-              );
-            }
-            hash.update(buf);
-            if (headerBytes < 8192) {
-              const need = Math.min(8192 - headerBytes, buf.length);
-              headerChunks.push(buf.subarray(0, need));
-              headerBytes += need;
-            }
-            if (!writeStream.write(buf)) {
-              await new Promise<void>((resolve) => writeStream.once("drain", resolve));
-            }
-          }
-
-          await new Promise<void>((resolve, reject) => {
-            writeStream.on("error", reject);
-            writeStream.end(() => resolve());
-          });
-
-          if (part.file.truncated) {
-            throw new AppError(
-              413,
-              "PAYLOAD_TOO_LARGE",
-              `单文件大小超过上限（${config.uploads.maxFileSizeMB} MB）`
-            );
-          }
-
-          stagedFile = {
-            tempPath,
-            originalFilename: part.filename || "unnamed",
-            declaredMime: part.mimetype || "application/octet-stream",
-            sha256: hash.digest("hex"),
-            sizeBytes,
-            header: Buffer.concat(headerChunks)
-          };
-        } catch (err) {
-          writeStream.destroy();
-          await fsp.rm(tempPath, { force: true }).catch(() => {});
-          throw err;
-        }
+        stagedFile = await stageMultipartFileToTemp(part.file, {
+          tempDir,
+          originalFilename: part.filename || "unnamed",
+          declaredMime: part.mimetype || "application/octet-stream",
+          maxFileBytes,
+          maxFileSizeMB: config.uploads.maxFileSizeMB
+        });
       }
 
       if (!stagedFile) {
