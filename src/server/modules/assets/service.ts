@@ -419,6 +419,52 @@ function upsertReadyFileRecord(
   return prepared.fileId;
 }
 
+function validateAssetRelations(
+  db: AppDatabase,
+  relations: {
+    folderId?: string | null;
+    tagIds?: string[];
+    productIds?: string[];
+  }
+): { tagIds: string[]; productIds: string[] } {
+  if (relations.folderId) {
+    const folder = db.raw.prepare("SELECT id FROM folders WHERE id = ?").get(relations.folderId);
+    if (!folder) {
+      throw new AppError(404, "NOT_FOUND", "指定的逻辑目录不存在");
+    }
+  }
+
+  const uniqueTagIds = Array.from(new Set(relations.tagIds ?? []));
+  if (uniqueTagIds.length > 0) {
+    const placeholders = uniqueTagIds.map(() => "?").join(", ");
+    const rows = db.raw
+      .prepare(`SELECT id FROM tags WHERE id IN (${placeholders})`)
+      .all(...uniqueTagIds) as Array<{ id: string }>;
+    const found = new Set(rows.map((row) => row.id));
+    for (const tagId of uniqueTagIds) {
+      if (!found.has(tagId)) {
+        throw new AppError(404, "NOT_FOUND", `标签 "${tagId}" 不存在`);
+      }
+    }
+  }
+
+  const uniqueProductIds = Array.from(new Set(relations.productIds ?? []));
+  if (uniqueProductIds.length > 0) {
+    const placeholders = uniqueProductIds.map(() => "?").join(", ");
+    const rows = db.raw
+      .prepare(`SELECT id FROM products WHERE id IN (${placeholders}) AND deleted_at IS NULL`)
+      .all(...uniqueProductIds) as Array<{ id: string }>;
+    const found = new Set(rows.map((row) => row.id));
+    for (const productId of uniqueProductIds) {
+      if (!found.has(productId)) {
+        throw new AppError(404, "NOT_FOUND", `关联商品 "${productId}" 不存在或已删除`);
+      }
+    }
+  }
+
+  return { tagIds: uniqueTagIds, productIds: uniqueProductIds };
+}
+
 export async function ingestStagedFile(
   db: AppDatabase,
   config: ResolvedAppConfig,
@@ -443,26 +489,11 @@ export async function ingestStagedFile(
   const objectKey = buildOriginalObjectKey(staged.sha256);
 
   // Validate optional folder/products/tags before writing physical file
-  if (options.folderId) {
-    const folder = db.raw.prepare("SELECT id FROM folders WHERE id = ?").get(options.folderId);
-    if (!folder) {
-      throw new AppError(404, "NOT_FOUND", "指定的逻辑目录不存在");
-    }
-  }
-  for (const productId of options.productIds) {
-    const product = db.raw
-      .prepare("SELECT id FROM products WHERE id = ? AND deleted_at IS NULL")
-      .get(productId);
-    if (!product) {
-      throw new AppError(404, "NOT_FOUND", `关联商品 "${productId}" 不存在或已删除`);
-    }
-  }
-  for (const tagId of options.tagIds) {
-    const tag = db.raw.prepare("SELECT id FROM tags WHERE id = ?").get(tagId);
-    if (!tag) {
-      throw new AppError(404, "NOT_FOUND", `标签 "${tagId}" 不存在`);
-    }
-  }
+  validateAssetRelations(db, {
+    folderId: options.folderId,
+    productIds: options.productIds,
+    tagIds: options.tagIds
+  });
 
   const dimensions = await inspectImageDimensions(staged.tempPath, detected.mimeType);
   const assetId = crypto.randomUUID();
@@ -485,6 +516,12 @@ export async function ingestStagedFile(
       const now = new Date().toISOString();
 
       db.transaction(() => {
+        const validated = validateAssetRelations(db, {
+          folderId: options.folderId,
+          productIds: options.productIds,
+          tagIds: options.tagIds
+        });
+
         const fileId = upsertReadyFileRecord(db, {
           prepared,
           targetStorageId,
@@ -540,14 +577,14 @@ export async function ingestStagedFile(
           .prepare("UPDATE assets SET current_version_id = ? WHERE id = ?")
           .run(versionId, assetId);
 
-        if (options.productIds.length > 0) {
+        if (validated.productIds.length > 0) {
           const insertLink = db.raw.prepare(
             "INSERT OR IGNORE INTO product_assets (product_id, asset_id, created_at) VALUES (?, ?, ?)"
           );
           const setCoverIfEmpty = db.raw.prepare(
             "UPDATE products SET cover_version_id = ?, updated_at = ? WHERE id = ? AND cover_version_id IS NULL"
           );
-          for (const productId of options.productIds) {
+          for (const productId of validated.productIds) {
             insertLink.run(productId, assetId, now);
             if (detected.isRasterPreviewable) {
               setCoverIfEmpty.run(versionId, now, productId);
@@ -555,11 +592,11 @@ export async function ingestStagedFile(
           }
         }
 
-        if (options.tagIds.length > 0) {
+        if (validated.tagIds.length > 0) {
           const insertTag = db.raw.prepare(
             "INSERT OR IGNORE INTO asset_tags (asset_id, tag_id, created_at) VALUES (?, ?, ?)"
           );
-          for (const tagId of options.tagIds) {
+          for (const tagId of validated.tagIds) {
             insertTag.run(assetId, tagId, now);
           }
         }
@@ -988,40 +1025,21 @@ export function updateAsset(
   assetId: string,
   input: UpdateAssetInput
 ): AssetDetail {
-  const existing = db.raw
-    .prepare("SELECT id FROM assets WHERE id = ? AND deleted_at IS NULL")
-    .get(assetId);
-  if (!existing) {
-    throw new AppError(404, "NOT_FOUND", "素材不存在或已在回收站中");
-  }
-
-  if (input.folderId) {
-    const folder = db.raw.prepare("SELECT id FROM folders WHERE id = ?").get(input.folderId);
-    if (!folder) {
-      throw new AppError(404, "NOT_FOUND", "指定的逻辑目录不存在");
-    }
-  }
-  if (input.tagIds) {
-    for (const tagId of input.tagIds) {
-      const tag = db.raw.prepare("SELECT id FROM tags WHERE id = ?").get(tagId);
-      if (!tag) {
-        throw new AppError(404, "NOT_FOUND", `标签 "${tagId}" 不存在`);
-      }
-    }
-  }
-  if (input.productIds) {
-    for (const productId of input.productIds) {
-      const product = db.raw
-        .prepare("SELECT id FROM products WHERE id = ? AND deleted_at IS NULL")
-        .get(productId);
-      if (!product) {
-        throw new AppError(404, "NOT_FOUND", `关联商品 "${productId}" 不存在`);
-      }
-    }
-  }
-
   const now = new Date().toISOString();
   db.transaction(() => {
+    const existing = db.raw
+      .prepare("SELECT id FROM assets WHERE id = ? AND deleted_at IS NULL")
+      .get(assetId);
+    if (!existing) {
+      throw new AppError(404, "NOT_FOUND", "素材不存在或已在回收站中");
+    }
+
+    const validated = validateAssetRelations(db, {
+      folderId: input.folderId,
+      tagIds: input.tagIds,
+      productIds: input.productIds
+    });
+
     const sets: string[] = ["updated_at = ?"];
     const params: Array<string | number | null> = [now];
 
@@ -1061,7 +1079,7 @@ export function updateAsset(
       const insertTag = db.raw.prepare(
         "INSERT OR IGNORE INTO asset_tags (asset_id, tag_id, created_at) VALUES (?, ?, ?)"
       );
-      for (const tagId of input.tagIds) {
+      for (const tagId of validated.tagIds) {
         insertTag.run(assetId, tagId, now);
       }
     }
@@ -1071,7 +1089,7 @@ export function updateAsset(
       const insertProd = db.raw.prepare(
         "INSERT OR IGNORE INTO product_assets (product_id, asset_id, created_at) VALUES (?, ?, ?)"
       );
-      for (const productId of input.productIds) {
+      for (const productId of validated.productIds) {
         insertProd.run(productId, assetId, now);
       }
     }
@@ -1103,6 +1121,12 @@ export function batchOperateAssets(
   let affectedCount = 0;
 
   db.transaction(() => {
+    const idPlaceholders = uniqueIds.map(() => "?").join(", ");
+    const activeRows = db.raw
+      .prepare(`SELECT id FROM assets WHERE id IN (${idPlaceholders}) AND deleted_at IS NULL`)
+      .all(...uniqueIds) as Array<{ id: string }>;
+    const activeAssetIds = activeRows.map((row) => row.id);
+
     if (input.action === "move_folder") {
       if (input.folderId) {
         const exists = db.raw.prepare("SELECT id FROM folders WHERE id = ?").get(input.folderId);
@@ -1113,7 +1137,7 @@ export function batchOperateAssets(
       const stmt = db.raw.prepare(
         "UPDATE assets SET folder_id = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL"
       );
-      for (const assetId of uniqueIds) {
+      for (const assetId of activeAssetIds) {
         const res = stmt.run(input.folderId ?? null, now, assetId);
         if (res.changes > 0) {
           affectedCount += 1;
@@ -1121,54 +1145,62 @@ export function batchOperateAssets(
         }
       }
     } else if (input.action === "add_tags") {
-      const tagIds = input.tagIds ?? [];
-      const stmt = db.raw.prepare(
-        "INSERT OR IGNORE INTO asset_tags (asset_id, tag_id, created_at) VALUES (?, ?, ?)"
-      );
-      for (const assetId of uniqueIds) {
-        for (const tagId of tagIds) {
-          stmt.run(assetId, tagId, now);
+      const { tagIds } = validateAssetRelations(db, { tagIds: input.tagIds });
+      if (tagIds.length > 0) {
+        const stmt = db.raw.prepare(
+          "INSERT OR IGNORE INTO asset_tags (asset_id, tag_id, created_at) VALUES (?, ?, ?)"
+        );
+        for (const assetId of activeAssetIds) {
+          for (const tagId of tagIds) {
+            stmt.run(assetId, tagId, now);
+          }
+          affectedCount += 1;
+          rebuildAssetSearchDocument(db, assetId);
         }
-        affectedCount += 1;
-        rebuildAssetSearchDocument(db, assetId);
       }
     } else if (input.action === "remove_tags") {
-      const tagIds = input.tagIds ?? [];
-      const stmt = db.raw.prepare("DELETE FROM asset_tags WHERE asset_id = ? AND tag_id = ?");
-      for (const assetId of uniqueIds) {
-        for (const tagId of tagIds) {
-          stmt.run(assetId, tagId);
+      const tagIds = Array.from(new Set(input.tagIds ?? []));
+      if (tagIds.length > 0) {
+        const stmt = db.raw.prepare("DELETE FROM asset_tags WHERE asset_id = ? AND tag_id = ?");
+        for (const assetId of activeAssetIds) {
+          for (const tagId of tagIds) {
+            stmt.run(assetId, tagId);
+          }
+          affectedCount += 1;
+          rebuildAssetSearchDocument(db, assetId);
         }
-        affectedCount += 1;
-        rebuildAssetSearchDocument(db, assetId);
       }
     } else if (input.action === "link_products") {
-      const productIds = input.productIds ?? [];
-      const stmt = db.raw.prepare(
-        "INSERT OR IGNORE INTO product_assets (product_id, asset_id, created_at) VALUES (?, ?, ?)"
-      );
-      for (const assetId of uniqueIds) {
-        for (const productId of productIds) {
-          stmt.run(productId, assetId, now);
+      const { productIds } = validateAssetRelations(db, { productIds: input.productIds });
+      if (productIds.length > 0) {
+        const stmt = db.raw.prepare(
+          "INSERT OR IGNORE INTO product_assets (product_id, asset_id, created_at) VALUES (?, ?, ?)"
+        );
+        for (const assetId of activeAssetIds) {
+          for (const productId of productIds) {
+            stmt.run(productId, assetId, now);
+          }
+          affectedCount += 1;
+          rebuildAssetSearchDocument(db, assetId);
         }
-        affectedCount += 1;
-        rebuildAssetSearchDocument(db, assetId);
       }
     } else if (input.action === "unlink_products") {
-      const productIds = input.productIds ?? [];
-      const stmt = db.raw.prepare("DELETE FROM product_assets WHERE product_id = ? AND asset_id = ?");
-      for (const assetId of uniqueIds) {
-        for (const productId of productIds) {
-          stmt.run(productId, assetId);
+      const productIds = Array.from(new Set(input.productIds ?? []));
+      if (productIds.length > 0) {
+        const stmt = db.raw.prepare("DELETE FROM product_assets WHERE product_id = ? AND asset_id = ?");
+        for (const assetId of activeAssetIds) {
+          for (const productId of productIds) {
+            stmt.run(productId, assetId);
+          }
+          affectedCount += 1;
+          rebuildAssetSearchDocument(db, assetId);
         }
-        affectedCount += 1;
-        rebuildAssetSearchDocument(db, assetId);
       }
     } else if (input.action === "soft_delete") {
       const stmt = db.raw.prepare(
         "UPDATE assets SET deleted_at = ?, updated_at = ? WHERE id = ? AND deleted_at IS NULL"
       );
-      for (const assetId of uniqueIds) {
+      for (const assetId of activeAssetIds) {
         const res = stmt.run(now, now, assetId);
         if (res.changes > 0) {
           affectedCount += 1;
@@ -1359,6 +1391,15 @@ export async function appendAssetVersion(
           .get(assetId) as { id: string } | undefined;
         if (!liveAsset) {
           throw new AppError(404, "NOT_FOUND", "素材不存在或已移入回收站");
+        }
+
+        if (options.referenceAssetVersionId) {
+          const liveRefVersion = db.raw
+            .prepare("SELECT id FROM asset_versions WHERE id = ?")
+            .get(options.referenceAssetVersionId);
+          if (!liveRefVersion) {
+            throw new AppError(404, "NOT_FOUND", "指定的参考素材版本不存在");
+          }
         }
 
         const fileId = upsertReadyFileRecord(db, {

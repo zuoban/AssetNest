@@ -254,46 +254,47 @@ export function createListing(
   actorUserId: string,
   input: CreateListingInput
 ): ListingDetail {
-  const product = db.raw
-    .prepare("SELECT id, spu FROM products WHERE id = ? AND deleted_at IS NULL")
-    .get(input.productId) as { id: string; spu: string } | undefined;
-  if (!product) {
-    throw new AppError(404, "NOT_FOUND", "所属商品不存在或已移入回收站");
-  }
-
-  const store = db.raw
-    .prepare("SELECT id, name, platform, market, default_language, status FROM stores WHERE id = ?")
-    .get(input.storeId) as
-    | {
-        id: string;
-        name: string;
-        platform: string;
-        market: string;
-        default_language: string;
-        status: string;
-      }
-    | undefined;
-  if (!store) {
-    throw new AppError(404, "NOT_FOUND", "目标店铺不存在");
-  }
-
   const listingId = crypto.randomUUID();
   const now = new Date().toISOString();
-  const language = (input.language ?? store.default_language).trim() || store.default_language;
   const displayName = input.displayName.trim();
-
   const skuIds = Array.from(new Set(input.skuIds ?? []));
-  if (skuIds.length > 0) {
-    const placeholders = skuIds.map(() => "?").join(", ");
-    const validSkus = db.raw
-      .prepare(`SELECT id FROM skus WHERE product_id = ? AND id IN (${placeholders})`)
-      .all(input.productId, ...skuIds) as Array<{ id: string }>;
-    if (validSkus.length !== skuIds.length) {
-      throw new AppError(400, "VALIDATION_ERROR", "所选 SKU 不属于当前商品");
-    }
-  }
 
   db.transaction(() => {
+    const product = db.raw
+      .prepare("SELECT id, spu FROM products WHERE id = ? AND deleted_at IS NULL")
+      .get(input.productId) as { id: string; spu: string } | undefined;
+    if (!product) {
+      throw new AppError(404, "NOT_FOUND", "所属商品不存在或已移入回收站");
+    }
+
+    const store = db.raw
+      .prepare("SELECT id, name, platform, market, default_language, status FROM stores WHERE id = ?")
+      .get(input.storeId) as
+      | {
+          id: string;
+          name: string;
+          platform: string;
+          market: string;
+          default_language: string;
+          status: string;
+        }
+      | undefined;
+    if (!store) {
+      throw new AppError(404, "NOT_FOUND", "目标店铺不存在");
+    }
+
+    const language = (input.language ?? store.default_language).trim() || store.default_language;
+
+    if (skuIds.length > 0) {
+      const placeholders = skuIds.map(() => "?").join(", ");
+      const validSkus = db.raw
+        .prepare(`SELECT id FROM skus WHERE product_id = ? AND id IN (${placeholders})`)
+        .all(input.productId, ...skuIds) as Array<{ id: string }>;
+      if (validSkus.length !== skuIds.length) {
+        throw new AppError(400, "VALIDATION_ERROR", "所选 SKU 不属于当前商品");
+      }
+    }
+
     db.raw
       .prepare(
         `INSERT INTO listings (
@@ -456,21 +457,22 @@ export function duplicateListing(
   sourceListingId: string,
   input: DuplicateListingInput = {}
 ): ListingDetail {
-  const source = getListingDetail(db, sourceListingId);
-  const targetStoreId = input.storeId || source.storeId;
-  const targetStore = db.raw
-    .prepare("SELECT id, default_language FROM stores WHERE id = ?")
-    .get(targetStoreId) as { id: string; default_language: string } | undefined;
-  if (!targetStore) {
-    throw new AppError(404, "NOT_FOUND", "目标店铺不存在");
-  }
-
   const newListingId = crypto.randomUUID();
   const now = new Date().toISOString();
-  const displayName = (input.displayName ?? `${source.displayName} (副本)`).trim();
-  const language = (input.language ?? source.language).trim() || targetStore.default_language;
 
   db.transaction(() => {
+    const source = getListingDetail(db, sourceListingId);
+    const targetStoreId = input.storeId || source.storeId;
+    const targetStore = db.raw
+      .prepare("SELECT id, default_language FROM stores WHERE id = ?")
+      .get(targetStoreId) as { id: string; default_language: string } | undefined;
+    if (!targetStore) {
+      throw new AppError(404, "NOT_FOUND", "目标店铺不存在");
+    }
+
+    const displayName = (input.displayName ?? `${source.displayName} (副本)`).trim();
+    const language = (input.language ?? source.language).trim() || targetStore.default_language;
+
     db.raw
       .prepare(
         `INSERT INTO listings (
@@ -595,8 +597,6 @@ export function syncListingSkus(
   listingId: string,
   items: SyncListingSkuItem[]
 ): ListingDetail {
-  const listing = getListingDetail(db, listingId);
-
   // Ensure no duplicate skuId in payload
   const seenSkuIds = new Set<string>();
   for (const item of items) {
@@ -606,19 +606,21 @@ export function syncListingSkus(
     seenSkuIds.add(item.skuId);
   }
 
-  if (items.length > 0) {
-    const skuIds = items.map((item) => item.skuId);
-    const placeholders = skuIds.map(() => "?").join(", ");
-    const validSkus = db.raw
-      .prepare(`SELECT id FROM skus WHERE product_id = ? AND id IN (${placeholders})`)
-      .all(listing.productId, ...skuIds) as Array<{ id: string }>;
-    if (validSkus.length !== skuIds.length) {
-      throw new AppError(400, "VALIDATION_ERROR", "所选 SKU 必须全部属于当前上架链接对应的商品");
-    }
-  }
-
   const now = new Date().toISOString();
   db.transaction(() => {
+    const listing = getListingDetail(db, listingId);
+
+    if (items.length > 0) {
+      const skuIds = items.map((item) => item.skuId);
+      const placeholders = skuIds.map(() => "?").join(", ");
+      const validSkus = db.raw
+        .prepare(`SELECT id FROM skus WHERE product_id = ? AND id IN (${placeholders})`)
+        .all(listing.productId, ...skuIds) as Array<{ id: string }>;
+      if (validSkus.length !== skuIds.length) {
+        throw new AppError(400, "VALIDATION_ERROR", "所选 SKU 必须全部属于当前上架链接对应的商品");
+      }
+    }
+
     const existingRows = db.raw
       .prepare("SELECT id, sku_id FROM listing_skus WHERE listing_id = ?")
       .all(listingId) as Array<{ id: string; sku_id: string }>;

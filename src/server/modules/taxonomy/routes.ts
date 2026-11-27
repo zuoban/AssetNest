@@ -31,12 +31,12 @@ const updateFolderSchema = z.object({
 const createTagSchema = z.object({
   dimension: tagDimensionEnum,
   name: z.string().trim().min(1, "标签名称不能为空").max(60),
-  parentId: z.string().uuid().nullable().optional()
+  parentId: z.string().trim().min(1).max(120).nullable().optional()
 });
 
 const updateTagSchema = z.object({
   name: z.string().trim().min(1).max(60).optional(),
-  parentId: z.string().uuid().nullable().optional()
+  parentId: z.string().trim().min(1).max(120).nullable().optional()
 });
 
 export function registerTaxonomyRoutes(

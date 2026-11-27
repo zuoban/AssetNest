@@ -210,43 +210,43 @@ export function replaceListingAssetSet(
   items: ReplaceAssetSetItemInput[],
   expectedItemIds?: string[]
 ): ListingAssetSetsResponse {
-  ensureActiveListing(db, listingId);
-
-  const uniqueVersionIds = Array.from(new Set(items.map((item) => item.assetVersionId)));
-  if (uniqueVersionIds.length > 0) {
-    const placeholders = uniqueVersionIds.map(() => "?").join(", ");
-    const found = db.raw
-      .prepare(`SELECT id FROM asset_versions WHERE id IN (${placeholders})`)
-      .all(...uniqueVersionIds) as Array<{ id: string }>;
-    const foundSet = new Set(found.map((row) => row.id));
-    for (const vid of uniqueVersionIds) {
-      if (!foundSet.has(vid)) {
-        throw new AppError(404, "NOT_FOUND", `素材版本 "${vid}" 不存在`);
-      }
-    }
-  }
-
-  if (kind === "sku") {
-    const validListingSkus = new Set(
-      (
-        db.raw
-          .prepare("SELECT id FROM listing_skus WHERE listing_id = ?")
-          .all(listingId) as Array<{ id: string }>
-      ).map((row) => row.id)
-    );
-
-    for (const item of items) {
-      if (!item.listingSkuId) {
-        throw new AppError(400, "VALIDATION_ERROR", "SKU 图集合中的每一项都必须绑定具体的 Listing SKU");
-      }
-      if (!validListingSkus.has(item.listingSkuId)) {
-        throw new AppError(400, "VALIDATION_ERROR", "指定的 Listing SKU 不属于当前上架链接");
-      }
-    }
-  }
-
   const now = new Date().toISOString();
   db.transaction(() => {
+    ensureActiveListing(db, listingId);
+
+    const uniqueVersionIds = Array.from(new Set(items.map((item) => item.assetVersionId)));
+    if (uniqueVersionIds.length > 0) {
+      const placeholders = uniqueVersionIds.map(() => "?").join(", ");
+      const found = db.raw
+        .prepare(`SELECT id FROM asset_versions WHERE id IN (${placeholders})`)
+        .all(...uniqueVersionIds) as Array<{ id: string }>;
+      const foundSet = new Set(found.map((row) => row.id));
+      for (const vid of uniqueVersionIds) {
+        if (!foundSet.has(vid)) {
+          throw new AppError(404, "NOT_FOUND", `素材版本 "${vid}" 不存在`);
+        }
+      }
+    }
+
+    if (kind === "sku") {
+      const validListingSkus = new Set(
+        (
+          db.raw
+            .prepare("SELECT id FROM listing_skus WHERE listing_id = ?")
+            .all(listingId) as Array<{ id: string }>
+        ).map((row) => row.id)
+      );
+
+      for (const item of items) {
+        if (!item.listingSkuId) {
+          throw new AppError(400, "VALIDATION_ERROR", "SKU 图集合中的每一项都必须绑定具体的 Listing SKU");
+        }
+        if (!validListingSkus.has(item.listingSkuId)) {
+          throw new AppError(400, "VALIDATION_ERROR", "指定的 Listing SKU 不属于当前上架链接");
+        }
+      }
+    }
+
     const setMap = ensureListingAssetSetsInTx(db, listingId, now);
     const setId = setMap[kind];
     if (expectedItemIds) {

@@ -389,32 +389,53 @@ export function createProduct(
   return getProductDetail(db, productId);
 }
 
+function ensureActiveAssetVersionExists(
+  db: AppDatabase,
+  versionId: string,
+  statusCode: number,
+  code: "VALIDATION_ERROR" | "NOT_FOUND",
+  message: string
+): void {
+  const row = db.raw
+    .prepare(
+      `SELECT av.id
+       FROM asset_versions av
+       JOIN assets a ON a.id = av.asset_id
+       WHERE av.id = ? AND a.deleted_at IS NULL`
+    )
+    .get(versionId);
+  if (!row) {
+    throw new AppError(statusCode, code, message);
+  }
+}
+
 export function updateProduct(
   db: AppDatabase,
   actorUserId: string,
   productId: string,
   input: UpdateProductInput
 ): ProductDetail {
-  const existing = db.raw
-    .prepare("SELECT id, spu FROM products WHERE id = ? AND deleted_at IS NULL")
-    .get(productId) as { id: string; spu: string } | undefined;
-
-  if (!existing) {
-    throw new AppError(404, "NOT_FOUND", "商品不存在或已进入回收站");
-  }
-
-  if (input.coverVersionId) {
-    const ver = db.raw
-      .prepare("SELECT id FROM asset_versions WHERE id = ?")
-      .get(input.coverVersionId);
-    if (!ver) {
-      throw new AppError(400, "VALIDATION_ERROR", "指定的封面素材版本不存在");
-    }
-  }
-
   const now = new Date().toISOString();
   try {
     db.transaction(() => {
+      const existing = db.raw
+        .prepare("SELECT id, spu FROM products WHERE id = ? AND deleted_at IS NULL")
+        .get(productId) as { id: string; spu: string } | undefined;
+
+      if (!existing) {
+        throw new AppError(404, "NOT_FOUND", "商品不存在或已进入回收站");
+      }
+
+      if (input.coverVersionId) {
+        ensureActiveAssetVersionExists(
+          db,
+          input.coverVersionId,
+          400,
+          "VALIDATION_ERROR",
+          "指定的封面素材版本不存在或已移入回收站"
+        );
+      }
+
       const sets: string[] = ["updated_at = ?"];
       const params: Array<string | number | null> = [now];
 
@@ -624,20 +645,30 @@ export function createSku(
   productId: string,
   input: CreateSkuInput
 ): SkuRecord {
-  const product = db.raw
-    .prepare("SELECT id, spu FROM products WHERE id = ? AND deleted_at IS NULL")
-    .get(productId) as { id: string; spu: string } | undefined;
-
-  if (!product) {
-    throw new AppError(404, "NOT_FOUND", "所属商品不存在或已删除");
-  }
-
   const { normalized, canonical } = canonicalizeSkuAttributes(input.attributes);
   const skuId = crypto.randomUUID();
   const now = new Date().toISOString();
 
   try {
     db.transaction(() => {
+      const product = db.raw
+        .prepare("SELECT id, spu FROM products WHERE id = ? AND deleted_at IS NULL")
+        .get(productId) as { id: string; spu: string } | undefined;
+
+      if (!product) {
+        throw new AppError(404, "NOT_FOUND", "所属商品不存在或已删除");
+      }
+
+      if (input.primaryAssetVersionId) {
+        ensureActiveAssetVersionExists(
+          db,
+          input.primaryAssetVersionId,
+          404,
+          "NOT_FOUND",
+          "指定的 SKU 主图素材版本不存在或已移入回收站"
+        );
+      }
+
       db.raw
         .prepare(
           `INSERT INTO skus (
@@ -692,17 +723,35 @@ export function updateSku(
   skuId: string,
   input: UpdateSkuInput
 ): SkuRecord {
-  const existing = db.raw
-    .prepare("SELECT * FROM skus WHERE id = ? AND product_id = ?")
-    .get(skuId, productId) as unknown as SkuRow | undefined;
-
-  if (!existing) {
-    throw new AppError(404, "NOT_FOUND", "SKU 不存在");
-  }
-
   const now = new Date().toISOString();
   try {
     db.transaction(() => {
+      const product = db.raw
+        .prepare("SELECT id FROM products WHERE id = ? AND deleted_at IS NULL")
+        .get(productId) as { id: string } | undefined;
+
+      if (!product) {
+        throw new AppError(404, "NOT_FOUND", "所属商品不存在或已删除");
+      }
+
+      const existing = db.raw
+        .prepare("SELECT * FROM skus WHERE id = ? AND product_id = ?")
+        .get(skuId, productId) as unknown as SkuRow | undefined;
+
+      if (!existing) {
+        throw new AppError(404, "NOT_FOUND", "SKU 不存在");
+      }
+
+      if (input.primaryAssetVersionId) {
+        ensureActiveAssetVersionExists(
+          db,
+          input.primaryAssetVersionId,
+          404,
+          "NOT_FOUND",
+          "指定的 SKU 主图素材版本不存在或已移入回收站"
+        );
+      }
+
       const sets: string[] = ["updated_at = ?"];
       const params: Array<string | null> = [now];
 
@@ -768,33 +817,41 @@ export function deleteSku(
   productId: string,
   skuId: string
 ): { deleted: boolean; id: string } {
-  const existing = db.raw
-    .prepare("SELECT id, code FROM skus WHERE id = ? AND product_id = ?")
-    .get(skuId, productId) as { id: string; code: string } | undefined;
-
-  if (!existing) {
-    throw new AppError(404, "NOT_FOUND", "SKU 不存在");
-  }
-
-  const hasListingSkus = Boolean(
-    db.raw
-      .prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'listing_skus'")
-      .get()
-  );
-  if (hasListingSkus) {
-    const ref = db.raw
-      .prepare("SELECT COUNT(*) AS count FROM listing_skus WHERE sku_id = ?")
-      .get(skuId) as { count: number };
-    if (Number(ref.count) > 0) {
-      throw new AppError(
-        409,
-        "CONFLICT",
-        `SKU "${existing.code}" 已被 ${ref.count} 条上架链接引用，无法直接删除；请先从对应 Listing 移除或改为停用`
-      );
-    }
-  }
-
   db.transaction(() => {
+    const product = db.raw
+      .prepare("SELECT id FROM products WHERE id = ? AND deleted_at IS NULL")
+      .get(productId) as { id: string } | undefined;
+
+    if (!product) {
+      throw new AppError(404, "NOT_FOUND", "所属商品不存在或已删除");
+    }
+
+    const existing = db.raw
+      .prepare("SELECT id, code FROM skus WHERE id = ? AND product_id = ?")
+      .get(skuId, productId) as { id: string; code: string } | undefined;
+
+    if (!existing) {
+      throw new AppError(404, "NOT_FOUND", "SKU 不存在");
+    }
+
+    const hasListingSkus = Boolean(
+      db.raw
+        .prepare("SELECT 1 AS ok FROM sqlite_master WHERE type = 'table' AND name = 'listing_skus'")
+        .get()
+    );
+    if (hasListingSkus) {
+      const ref = db.raw
+        .prepare("SELECT COUNT(*) AS count FROM listing_skus WHERE sku_id = ?")
+        .get(skuId) as { count: number };
+      if (Number(ref.count) > 0) {
+        throw new AppError(
+          409,
+          "CONFLICT",
+          `SKU "${existing.code}" 已被 ${ref.count} 条上架链接引用，无法直接删除；请先从对应 Listing 移除或改为停用`
+        );
+      }
+    }
+
     db.raw.prepare("DELETE FROM skus WHERE id = ? AND product_id = ?").run(skuId, productId);
     rebuildProductSearchDocument(db, productId);
     recordActivity(db, {

@@ -35,7 +35,7 @@ export function getFolderSubtreeIds(db: AppDatabase, folderId: string): string[]
     .prepare(
       `WITH RECURSIVE subtree(id) AS (
          SELECT id FROM folders WHERE id = ?
-         UNION ALL
+         UNION
          SELECT f.id FROM folders f JOIN subtree s ON f.parent_id = s.id
        )
        SELECT id FROM subtree`
@@ -71,17 +71,18 @@ export function createFolder(
   input: { name: string; parentId?: string | null; position?: number }
 ): FolderRecord {
   const parentId = input.parentId ?? null;
-  if (parentId) {
-    const parent = db.raw.prepare("SELECT id FROM folders WHERE id = ?").get(parentId);
-    if (!parent) {
-      throw new AppError(404, "NOT_FOUND", "上级目录不存在");
-    }
-  }
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
 
   try {
     db.transaction(() => {
+      if (parentId) {
+        const parent = db.raw.prepare("SELECT id FROM folders WHERE id = ?").get(parentId);
+        if (!parent) {
+          throw new AppError(404, "NOT_FOUND", "上级目录不存在");
+        }
+      }
+
       db.raw
         .prepare(
           `INSERT INTO folders (id, parent_id, name, position, created_at, updated_at)
@@ -121,39 +122,46 @@ export function updateFolder(
   folderId: string,
   input: { name?: string; parentId?: string | null; position?: number }
 ): FolderRecord {
-  const existing = db.raw
-    .prepare("SELECT id, parent_id, name, position FROM folders WHERE id = ?")
-    .get(folderId) as { id: string; parent_id: string | null; name: string; position: number } | undefined;
-
-  if (!existing) {
-    throw new AppError(404, "NOT_FOUND", "目录不存在");
-  }
-
-  const nextParentId = input.parentId !== undefined ? input.parentId : existing.parent_id;
-  if (nextParentId === folderId) {
-    throw new AppError(400, "VALIDATION_ERROR", "目录不能设置为自己的上级目录");
-  }
-
-  // Check circular ancestry
-  if (nextParentId) {
-    let cursor: string | null = nextParentId;
-    while (cursor) {
-      if (cursor === folderId) {
-        throw new AppError(400, "VALIDATION_ERROR", "目录层级不能形成循环嵌套");
-      }
-      const parentRow = db.raw
-        .prepare("SELECT parent_id FROM folders WHERE id = ?")
-        .get(cursor) as { parent_id: string | null } | undefined;
-      if (!parentRow) {
-        throw new AppError(404, "NOT_FOUND", "指定的上级目录不存在");
-      }
-      cursor = parentRow.parent_id;
-    }
-  }
-
   const now = new Date().toISOString();
   try {
     db.transaction(() => {
+      const existing = db.raw
+        .prepare("SELECT id, parent_id, name, position FROM folders WHERE id = ?")
+        .get(folderId) as
+        | { id: string; parent_id: string | null; name: string; position: number }
+        | undefined;
+
+      if (!existing) {
+        throw new AppError(404, "NOT_FOUND", "目录不存在");
+      }
+
+      const nextParentId = input.parentId !== undefined ? input.parentId : existing.parent_id;
+      if (nextParentId === folderId) {
+        throw new AppError(400, "VALIDATION_ERROR", "目录不能设置为自己的上级目录");
+      }
+
+      // Check parent existence and circular ancestry
+      if (nextParentId) {
+        const visited = new Set<string>();
+        let cursor: string | null = nextParentId;
+        while (cursor) {
+          if (cursor === folderId) {
+            throw new AppError(400, "VALIDATION_ERROR", "目录层级不能形成循环嵌套");
+          }
+          if (visited.has(cursor)) {
+            throw new AppError(400, "VALIDATION_ERROR", "目标上级目录层级存在循环异常");
+          }
+          visited.add(cursor);
+          const parentRow = db.raw
+            .prepare("SELECT parent_id FROM folders WHERE id = ?")
+            .get(cursor) as { parent_id: string | null } | undefined;
+          if (!parentRow) {
+            throw new AppError(404, "NOT_FOUND", "指定的上级目录不存在");
+          }
+          cursor = parentRow.parent_id;
+        }
+      }
+
       db.raw
         .prepare(
           `UPDATE folders
@@ -205,39 +213,36 @@ export function deleteFolder(
   folderId: string,
   options: { recursive?: boolean } = {}
 ): { deleted: boolean; id: string; deletedIds: string[] } {
-  const existing = db.raw
-    .prepare("SELECT id, name FROM folders WHERE id = ?")
-    .get(folderId) as { id: string; name: string } | undefined;
+  const deletedIds = db.transaction(() => {
+    const existing = db.raw
+      .prepare("SELECT id, name FROM folders WHERE id = ?")
+      .get(folderId) as { id: string; name: string } | undefined;
 
-  if (!existing) {
-    throw new AppError(404, "NOT_FOUND", "目录不存在");
-  }
+    if (!existing) {
+      throw new AppError(404, "NOT_FOUND", "目录不存在");
+    }
 
-  const subtreeRows = db.raw
-    .prepare(
-      `WITH RECURSIVE subtree(id, depth) AS (
-         SELECT id, 0 FROM folders WHERE id = ?
-         UNION ALL
-         SELECT f.id, s.depth + 1 FROM folders f JOIN subtree s ON f.parent_id = s.id
-       )
-       SELECT id, depth FROM subtree ORDER BY depth DESC`
-    )
-    .all(folderId) as Array<{ id: string; depth: number }>;
+    const subtreeRows = db.raw
+      .prepare(
+        `WITH RECURSIVE subtree(id, depth) AS (
+           SELECT id, 0 FROM folders WHERE id = ?
+           UNION ALL
+           SELECT f.id, s.depth + 1 FROM folders f JOIN subtree s ON f.parent_id = s.id
+         )
+         SELECT id, depth FROM subtree ORDER BY depth DESC`
+      )
+      .all(folderId) as Array<{ id: string; depth: number }>;
 
-  if (subtreeRows.length > 1 && !options.recursive) {
-    throw new AppError(409, "CONFLICT", "该目录下仍存在子目录，请先移除或删除子目录");
-  }
+    if (subtreeRows.length > 1 && !options.recursive) {
+      throw new AppError(409, "CONFLICT", "该目录下仍存在子目录，请先移除或删除子目录");
+    }
 
-  const deletedIds = subtreeRows.map((row) => row.id);
-
-  db.transaction(() => {
+    const ids = subtreeRows.map((row) => row.id);
     const affectedAssets =
-      deletedIds.length > 0
+      ids.length > 0
         ? (db.raw
-            .prepare(
-              `SELECT id FROM assets WHERE folder_id IN (${deletedIds.map(() => "?").join(", ")})`
-            )
-            .all(...deletedIds) as Array<{ id: string }>)
+            .prepare(`SELECT id FROM assets WHERE folder_id IN (${ids.map(() => "?").join(", ")})`)
+            .all(...ids) as Array<{ id: string }>)
         : [];
     const deleteStmt = db.raw.prepare("DELETE FROM folders WHERE id = ?");
     for (const row of subtreeRows) {
@@ -254,9 +259,10 @@ export function deleteFolder(
       details: {
         name: existing.name,
         recursive: Boolean(options.recursive),
-        deletedCount: deletedIds.length
+        deletedCount: ids.length
       }
     });
+    return ids;
   });
 
   return { deleted: true, id: folderId, deletedIds };
@@ -296,23 +302,23 @@ export function createTag(
   input: { dimension: TagDimension; name: string; parentId?: string | null }
 ): TagRecord {
   const parentId = input.parentId ?? null;
-  if (parentId) {
-    const parent = db.raw
-      .prepare("SELECT id, dimension FROM tags WHERE id = ?")
-      .get(parentId) as { id: string; dimension: TagDimension } | undefined;
-    if (!parent) {
-      throw new AppError(404, "NOT_FOUND", "上级标签不存在");
-    }
-    if (parent.dimension !== input.dimension) {
-      throw new AppError(400, "VALIDATION_ERROR", "子标签维度必须与上级标签一致");
-    }
-  }
-
   const id = crypto.randomUUID();
   const now = new Date().toISOString();
 
   try {
     db.transaction(() => {
+      if (parentId) {
+        const parent = db.raw
+          .prepare("SELECT id, dimension FROM tags WHERE id = ?")
+          .get(parentId) as { id: string; dimension: TagDimension } | undefined;
+        if (!parent) {
+          throw new AppError(404, "NOT_FOUND", "上级标签不存在");
+        }
+        if (parent.dimension !== input.dimension) {
+          throw new AppError(400, "VALIDATION_ERROR", "子标签维度必须与上级标签一致");
+        }
+      }
+
       db.raw
         .prepare(
           `INSERT INTO tags (id, dimension, parent_id, name, is_system, created_at, updated_at)
@@ -325,7 +331,7 @@ export function createTag(
         action: "tag.create",
         objectType: "tag",
         objectId: id,
-        details: { dimension: input.dimension, name: input.name.trim() }
+        details: { dimension: input.dimension, name: input.name.trim(), parentId }
       });
     });
   } catch (err) {
@@ -353,22 +359,49 @@ export function updateTag(
   tagId: string,
   input: { name?: string; parentId?: string | null }
 ): TagRecord {
-  const existing = db.raw
-    .prepare("SELECT id, dimension, parent_id, name FROM tags WHERE id = ?")
-    .get(tagId) as { id: string; dimension: TagDimension; parent_id: string | null; name: string } | undefined;
-
-  if (!existing) {
-    throw new AppError(404, "NOT_FOUND", "标签不存在");
-  }
-
-  const nextParentId = input.parentId !== undefined ? input.parentId : existing.parent_id;
-  if (nextParentId === tagId) {
-    throw new AppError(400, "VALIDATION_ERROR", "标签不能设置为自身上级");
-  }
-
   const now = new Date().toISOString();
   try {
     db.transaction(() => {
+      const existing = db.raw
+        .prepare("SELECT id, dimension, parent_id, name FROM tags WHERE id = ?")
+        .get(tagId) as
+        | { id: string; dimension: TagDimension; parent_id: string | null; name: string }
+        | undefined;
+
+      if (!existing) {
+        throw new AppError(404, "NOT_FOUND", "标签不存在");
+      }
+
+      const nextParentId = input.parentId !== undefined ? input.parentId : existing.parent_id;
+      if (nextParentId === tagId) {
+        throw new AppError(400, "VALIDATION_ERROR", "标签不能设置为自身上级");
+      }
+
+      // Check parent existence, dimension consistency, and circular ancestry
+      if (nextParentId) {
+        const visited = new Set<string>();
+        let cursor: string | null = nextParentId;
+        while (cursor) {
+          if (cursor === tagId) {
+            throw new AppError(400, "VALIDATION_ERROR", "标签层级不能形成循环嵌套");
+          }
+          if (visited.has(cursor)) {
+            throw new AppError(400, "VALIDATION_ERROR", "目标上级标签层级存在循环异常");
+          }
+          visited.add(cursor);
+          const parentRow = db.raw
+            .prepare("SELECT dimension, parent_id FROM tags WHERE id = ?")
+            .get(cursor) as { dimension: TagDimension; parent_id: string | null } | undefined;
+          if (!parentRow) {
+            throw new AppError(404, "NOT_FOUND", "指定的上级标签不存在");
+          }
+          if (parentRow.dimension !== existing.dimension) {
+            throw new AppError(400, "VALIDATION_ERROR", "子标签维度必须与上级标签一致");
+          }
+          cursor = parentRow.parent_id;
+        }
+      }
+
       db.raw
         .prepare("UPDATE tags SET name = ?, parent_id = ?, updated_at = ? WHERE id = ?")
         .run(
@@ -390,7 +423,7 @@ export function updateTag(
         action: "tag.update",
         objectType: "tag",
         objectId: tagId,
-        details: { name: input.name?.trim() }
+        details: { name: input.name?.trim(), parentId: nextParentId }
       });
     });
   } catch (err) {
@@ -408,25 +441,25 @@ export function deleteTag(
   actorUserId: string,
   tagId: string
 ): { deleted: boolean; id: string } {
-  const existing = db.raw
-    .prepare("SELECT id, name, dimension FROM tags WHERE id = ?")
-    .get(tagId) as { id: string; name: string; dimension: string } | undefined;
-
-  if (!existing) {
-    throw new AppError(404, "NOT_FOUND", "标签不存在");
-  }
-
-  const childCount = (
-    db.raw.prepare("SELECT COUNT(*) AS count FROM tags WHERE parent_id = ?").get(tagId) as {
-      count: number;
-    }
-  ).count;
-
-  if (childCount > 0) {
-    throw new AppError(409, "CONFLICT", "该标签下存在子标签，请先移除子标签");
-  }
-
   db.transaction(() => {
+    const existing = db.raw
+      .prepare("SELECT id, name, dimension FROM tags WHERE id = ?")
+      .get(tagId) as { id: string; name: string; dimension: string } | undefined;
+
+    if (!existing) {
+      throw new AppError(404, "NOT_FOUND", "标签不存在");
+    }
+
+    const childCount = (
+      db.raw.prepare("SELECT COUNT(*) AS count FROM tags WHERE parent_id = ?").get(tagId) as {
+        count: number;
+      }
+    ).count;
+
+    if (childCount > 0) {
+      throw new AppError(409, "CONFLICT", "该标签下存在子标签，请先移除子标签");
+    }
+
     const linkedAssets = db.raw
       .prepare("SELECT asset_id FROM asset_tags WHERE tag_id = ?")
       .all(tagId) as Array<{ asset_id: string }>;
